@@ -44,7 +44,12 @@ func main() {
 			fmt.Println("Client: Please enter the file path:")
 			var path string
 			fmt.Scanln(&path)
-			fileName := path
+
+			fmt.Println("Client: Please enter the file path:")
+			var name string
+			fmt.Scanln(&name)
+
+			fileName := name
 			fileData, err := os.ReadFile(path)
 			if err != nil {
 				log.Printf("Client: unable to read file '%s', Error: %v", fileName, err)

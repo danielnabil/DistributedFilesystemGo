@@ -125,7 +125,7 @@ func main() {
 	keeperID := "DataKeeper-1"
 	masterIP := "127.0.0.1"
 	masterPort := "50050"
-	storagePath := "./storage"
+	storagePath := "./uploading_folder"
 
 	// Create data keeper server
 	keeper := &dataKeeperServer{
