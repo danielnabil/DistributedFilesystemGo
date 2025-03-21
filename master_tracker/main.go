@@ -30,11 +30,12 @@ type fileInfo struct {
 
 // dataKeeperInfo tracks information about a data keeper node
 type dataKeeperInfo struct {
-	ID       string
-	IP       string
-	Port     string
-	IsAlive  bool
-	LastSeen int64 // Unix timestamp of last heartbeat
+	ID             string
+	IP             string
+	Port           string   // Primary port (for backward compatibility)
+	AvailablePorts []string // All available ports
+	IsAlive        bool
+	LastSeen       int64 // Unix timestamp of last heartbeat
 }
 
 // RequestUploadPermission is called by the client to get an available Data Keeper for upload.
@@ -80,19 +81,24 @@ func (m *masterTrackerServer) RequestUploadPermission(ctx context.Context, req *
 	}
 
 	// Select a random alive data keeper
+	rand.Seed(time.Now().UnixNano())
 	selectedKeeper := aliveKeepers[rand.Intn(len(aliveKeepers))]
+
+	// Use port from keeper's available ports (using the first port for simplicity)
+	// In a more advanced implementation, you could track port usage and select the least loaded port
+	selectedPort := selectedKeeper.Port
 
 	// Create the response
 	assigned := &pb.MachineInfo{
 		Ip:   selectedKeeper.IP,
-		Port: selectedKeeper.Port,
+		Port: selectedPort,
 	}
 
 	// Generate upload token (client ID + timestamp)
 	token := fmt.Sprintf("%s-%d", req.ClientId, time.Now().Unix())
 
 	fmt.Printf("MasterTracker: Received upload permission request from client %s. Assigned Data Keeper: %s (ID: %s) on port %s\n",
-		req.ClientId, selectedKeeper.IP, selectedKeeper.ID, selectedKeeper.Port)
+		req.ClientId, selectedKeeper.IP, selectedKeeper.ID, selectedPort)
 
 	return &pb.UploadPermissionResponse{
 		UploadToken:        token,
@@ -136,32 +142,42 @@ func (m *masterTrackerServer) SendHeartbeat(ctx context.Context, req *pb.Heartbe
 	keeper, exists := m.dataKeepers[dataKeeperID]
 	if !exists {
 		// If this is a new data keeper, create an entry for it
-		// For simplicity, we'll extract IP from context or use a default
+		// Extract IP from peer info or use default
 		ip := "127.0.0.1"
 		port := "50051"
 
-		// If there are available ports, use the first one
+		// If there are available ports, use the first one as primary and store all
+		availablePorts := []string{port}
 		if len(req.AvailablePorts) > 0 {
-			port = req.AvailablePorts[0]
+			port = req.AvailablePorts[0] // Primary port is the first one
+			availablePorts = req.AvailablePorts
 		}
 
 		keeper = &dataKeeperInfo{
-			ID:       dataKeeperID,
-			IP:       ip,
-			Port:     port,
-			IsAlive:  true,
-			LastSeen: time.Now().Unix(),
+			ID:             dataKeeperID,
+			IP:             ip,
+			Port:           port,
+			AvailablePorts: availablePorts,
+			IsAlive:        true,
+			LastSeen:       time.Now().Unix(),
 		}
 		m.dataKeepers[dataKeeperID] = keeper
 
-		fmt.Printf("MasterTracker: New Data Keeper registered: %s at %s:%s\n",
-			dataKeeperID, ip, port)
+		fmt.Printf("MasterTracker: New Data Keeper registered: %s at %s with ports %v\n",
+			dataKeeperID, ip, availablePorts)
 	} else {
 		// Update existing data keeper
 		keeper.IsAlive = true
 		keeper.LastSeen = time.Now().Unix()
 
-		fmt.Printf("MasterTracker: Received heartbeat from Data Keeper %s\n", dataKeeperID)
+		// Update available ports if they changed
+		if len(req.AvailablePorts) > 0 {
+			keeper.AvailablePorts = req.AvailablePorts
+			keeper.Port = req.AvailablePorts[0] // Update primary port as well
+		}
+
+		fmt.Printf("MasterTracker: Received heartbeat from Data Keeper %s with ports %v\n",
+			dataKeeperID, keeper.AvailablePorts)
 	}
 
 	return &pb.Ack{Success: true, Message: "Heartbeat acknowledged"}, nil

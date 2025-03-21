@@ -2,10 +2,13 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"net"
 	"os"
+	"strings"
+	"sync"
 	"time"
 
 	pb "DistributedFileSystem/dfs"
@@ -20,6 +23,7 @@ type dataKeeperServer struct {
 	id          string // unique identifier for the data keeper
 	masterIP    string
 	masterPort  string
+	ports       []string // available ports for this data keeper
 	storagePath string
 }
 
@@ -27,15 +31,15 @@ type dataKeeperServer struct {
 func (d *dataKeeperServer) UploadFile(ctx context.Context, req *pb.UploadFileRequest) (*pb.UploadFileResponse, error) {
 	fmt.Printf("DataKeeper %s: Received file upload request for '%s' (size: %d bytes).\n",
 		d.id, req.FileName, len(req.FileData))
-
+	storagePath := d.storagePath + "/" + d.id + "/"
 	// Create file storage path if it doesn't exist
-	if err := os.MkdirAll(d.storagePath, 0755); err != nil {
+	if err := os.MkdirAll(storagePath, 0755); err != nil {
 		log.Printf("DataKeeper %s: Error creating storage directory: %v", d.id, err)
 		return nil, fmt.Errorf("storage error: %v", err)
 	}
 
 	// Save the file to disk
-	filePath := fmt.Sprintf("%s/%s", d.storagePath, req.FileName)
+	filePath := fmt.Sprintf("%s/%s", storagePath, req.FileName)
 	if err := os.WriteFile(filePath, req.FileData, 0644); err != nil {
 		log.Printf("DataKeeper %s: Error writing file: %v", d.id, err)
 		return nil, fmt.Errorf("file write error: %v", err)
@@ -51,7 +55,7 @@ func (d *dataKeeperServer) UploadFile(ctx context.Context, req *pb.UploadFileReq
 func notifyMasterOfUpload(masterIP, masterPort, fileName, dataKeeperID, filePath string) {
 	// Connect to the master tracker
 	masterAddr := fmt.Sprintf("%s:%s", masterIP, masterPort)
-	conn, err := grpc.NewClient(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.Dial(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Printf("DataKeeper %s: failed to connect to master tracker: %v", dataKeeperID, err)
 		return
@@ -82,7 +86,7 @@ func (d *dataKeeperServer) sendHeartbeats() {
 	masterAddr := fmt.Sprintf("%s:%s", d.masterIP, d.masterPort)
 
 	for {
-		conn, err := grpc.NewClient(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		conn, err := grpc.Dial(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			log.Printf("DataKeeper %s: Failed to connect to master tracker for heartbeat: %v", d.id, err)
 			time.Sleep(1 * time.Second)
@@ -91,12 +95,9 @@ func (d *dataKeeperServer) sendHeartbeats() {
 
 		client := pb.NewDistributedFileSystemClient(conn)
 
-		// Currently we only use one port, but this could be extended
-		availablePorts := []string{"50051"}
-
 		heartbeatReq := &pb.HeartbeatRequest{
 			DataKeeperId:   d.id,
-			AvailablePorts: availablePorts,
+			AvailablePorts: d.ports,
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
@@ -106,7 +107,7 @@ func (d *dataKeeperServer) sendHeartbeats() {
 		if err != nil {
 			log.Printf("DataKeeper %s: Failed to send heartbeat: %v", d.id, err)
 		} else {
-			log.Printf("DataKeeper %s: Heartbeat sent successfully", d.id)
+			log.Printf("DataKeeper %s: Heartbeat sent successfully with ports %v", d.id, d.ports)
 		}
 
 		conn.Close()
@@ -114,36 +115,61 @@ func (d *dataKeeperServer) sendHeartbeats() {
 	}
 }
 
-func main() {
-	// Data keeper listens on port 50051.
-	port := "50051"
+// startServer starts a gRPC server on the given port
+func startServer(keeper *dataKeeperServer, port string, wg *sync.WaitGroup) {
+	defer wg.Done()
+
 	lis, err := net.Listen("tcp", ":"+port)
 	if err != nil {
-		log.Fatalf("DataKeeper: failed to listen: %v", err)
+		log.Fatalf("DataKeeper %s: failed to listen on port %s: %v", keeper.id, port, err)
 	}
 
-	keeperID := "DataKeeper-1"
-	masterIP := "127.0.0.1"
-	masterPort := "50050"
-	storagePath := "./uploading_folder"
+	grpcServer := grpc.NewServer()
+	pb.RegisterDistributedFileSystemServer(grpcServer, keeper)
+
+	log.Printf("DataKeeper %s: Server is listening on port %s...", keeper.id, port)
+	if err := grpcServer.Serve(lis); err != nil {
+		log.Fatalf("DataKeeper %s: failed to serve on port %s: %v", keeper.id, port, err)
+	}
+}
+
+func main() {
+	// Parse command line arguments
+	id := flag.String("name", "DataKeeper-1", "Unique identifier for this data keeper node")
+	portsStr := flag.String("ports", "50051", "Space-separated list of ports to listen on")
+	masterIP := flag.String("master_ip", "127.0.0.1", "IP address of the master tracker")
+	masterPort := flag.String("master_port", "50050", "Port of the master tracker")
+	storagePath := flag.String("storage", "./uploading_folder", "Path for storage")
+
+	flag.Parse()
+
+	// Split ports string into slice
+	ports := strings.Fields(*portsStr)
+	if len(ports) == 0 {
+		log.Fatal("At least one port must be specified")
+	}
 
 	// Create data keeper server
 	keeper := &dataKeeperServer{
-		id:          keeperID,
-		masterIP:    masterIP,
-		masterPort:  masterPort,
-		storagePath: storagePath,
+		id:          *id,
+		masterIP:    *masterIP,
+		masterPort:  *masterPort,
+		ports:       ports,
+		storagePath: *storagePath,
 	}
 
 	// Start heartbeat goroutine
 	go keeper.sendHeartbeats()
 
-	// Start gRPC server
-	grpcServer := grpc.NewServer()
-	pb.RegisterDistributedFileSystemServer(grpcServer, keeper)
+	// Create a wait group to keep the main function from returning
+	var wg sync.WaitGroup
 
-	log.Printf("DataKeeper %s: Server is listening on port %s...", keeperID, port)
-	if err := grpcServer.Serve(lis); err != nil {
-		log.Fatalf("DataKeeper: failed to serve: %v", err)
+	// Start a server on each port
+	for _, port := range ports {
+		wg.Add(1)
+		go startServer(keeper, port, &wg)
 	}
+
+	// Wait for all servers to finish (which shouldn't happen unless there's an error)
+	wg.Wait()
 }
