@@ -12,6 +12,7 @@ import (
 	pb "DistributedFileSystem/dfs" // Import the generated proto package
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // masterTrackerServer implements the DistributedFileSystem gRPC service for the master tracker.
@@ -176,8 +177,8 @@ func (m *masterTrackerServer) SendHeartbeat(ctx context.Context, req *pb.Heartbe
 			keeper.Port = req.AvailablePorts[0] // Update primary port as well
 		}
 
-		fmt.Printf("MasterTracker: Received heartbeat from Data Keeper %s with ports %v\n",
-			dataKeeperID, keeper.AvailablePorts)
+		// fmt.Printf("MasterTracker: Received heartbeat from Data Keeper %s with ports %v\n",
+		// dataKeeperID, keeper.AvailablePorts)
 	}
 
 	return &pb.Ack{Success: true, Message: "Heartbeat acknowledged"}, nil
@@ -250,6 +251,161 @@ func (m *masterTrackerServer) RequestDownloadInfo(ctx context.Context, req *pb.D
 	}, nil
 }
 
+// checkAndInitiateReplication periodically checks and initiates replication for files with less than 3 copies
+func (m *masterTrackerServer) checkAndInitiateReplication() {
+	replicationInterval := 10 * time.Second // Check for replication every 10 seconds
+
+	for {
+		time.Sleep(replicationInterval)
+
+		m.mu.Lock()
+		fmt.Println("\n--- REPLICATION CHECK STARTED ---")
+		fmt.Printf("System Status: %d active data keepers, %d unique files in storage\n",
+			len(m.dataKeepers), len(m.lookupTable))
+
+		// Check each file in the lookup table
+		for fileName, fileInfo := range m.lookupTable {
+			// Get count of alive instances
+			aliveInstances := 0
+			var sourceKeeper *dataKeeperInfo
+			var sourceFilePath string
+
+			// First find an alive source for this file
+			for keeperID, filePath := range fileInfo.DataKeepers {
+				keeper, exists := m.dataKeepers[keeperID]
+				if exists && keeper.IsAlive {
+					sourceKeeper = keeper
+					sourceFilePath = filePath
+					aliveInstances++
+					break
+				}
+			}
+
+			// If no alive sources, skip this file
+			if sourceKeeper == nil {
+				fmt.Printf("ALERT: File '%s' has no alive sources - CANNOT REPLICATE\n", fileName)
+				continue
+			}
+
+			// Count the rest of alive instances
+			for keeperID := range fileInfo.DataKeepers {
+				keeper, exists := m.dataKeepers[keeperID]
+				// Don't count the source keeper again
+				if exists && keeper.IsAlive && keeper.ID != sourceKeeper.ID {
+					aliveInstances++
+				}
+			}
+
+			replicaStatus := "NEEDS REPLICATION"
+			if aliveInstances >= 3 {
+				replicaStatus = "OK"
+			}
+
+			fmt.Printf("File: '%s' | Live copies: %d | Status: %s\n",
+				fileName, aliveInstances, replicaStatus)
+
+			// Replicate until we have at least 3 instances
+			for aliveInstances < 3 {
+				// Find a data keeper that doesn't have this file yet
+				destinationKeeper := m.selectMachineToCopyTo(fileName)
+				if destinationKeeper == nil {
+					fmt.Printf("  └── Cannot replicate: No suitable destination nodes available\n")
+					break
+				}
+
+				// Initiate replication
+				fmt.Printf("  └── Attempting replication to '%s' (port %s)...\n",
+					destinationKeeper.ID, destinationKeeper.Port)
+
+				success := m.notifyMachineDataTransfer(sourceKeeper, destinationKeeper, fileName, sourceFilePath)
+				if success {
+					aliveInstances++
+					// Success message is handled in notifyMachineDataTransfer
+				} else {
+					// Error message is handled in notifyMachineDataTransfer
+					break
+				}
+			}
+		}
+
+		m.mu.Unlock()
+		fmt.Println("--- REPLICATION CHECK COMPLETED ---")
+	}
+}
+
+// selectMachineToCopyTo returns a valid data keeper to copy a file to
+func (m *masterTrackerServer) selectMachineToCopyTo(fileName string) *dataKeeperInfo {
+	fileInfo, exists := m.lookupTable[fileName]
+	if !exists {
+		return nil
+	}
+
+	// Find alive keepers that don't already have this file
+	var candidates []*dataKeeperInfo
+	for _, keeper := range m.dataKeepers {
+		if keeper.IsAlive {
+			// Check if this keeper already has the file
+			_, hasFile := fileInfo.DataKeepers[keeper.ID]
+			if !hasFile {
+				candidates = append(candidates, keeper)
+			}
+		}
+	}
+
+	if len(candidates) == 0 {
+		return nil
+	}
+
+	// Select a random candidate
+	return candidates[rand.Intn(len(candidates))]
+}
+
+// notifyMachineDataTransfer notifies source and destination machines to transfer a file
+func (m *masterTrackerServer) notifyMachineDataTransfer(source, destination *dataKeeperInfo, fileName, sourceFilePath string) bool {
+	// Create replication request
+	replicationReq := &pb.ReplicationRequest{
+		FileName:              fileName,
+		SourceDataKeeper:      source.ID, // Using ID instead of port for better identification
+		DestinationDataKeeper: destination.Port,
+	}
+
+	// Connect to the source data keeper to initiate replication
+	sourceAddr := fmt.Sprintf("%s:%s", source.IP, source.Port)
+	fmt.Printf("    ├── Connecting to source node %s at %s...\n", source.ID, sourceAddr)
+
+	conn, err := grpc.Dial(sourceAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		fmt.Printf("    ├── CONNECTION ERROR: Failed to connect to source node %s at %s: %v\n",
+			source.ID, sourceAddr, err)
+		return false
+	}
+	defer conn.Close()
+
+	// Create client and send the replication request
+	client := pb.NewDistributedFileSystemClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	fmt.Printf("    ├── Requesting replication of '%s' to port %s...\n",
+		fileName, destination.Port)
+
+	resp, err := client.InitiateReplication(ctx, replicationReq)
+	if err != nil {
+		fmt.Printf("    └── RPC ERROR: Replication request failed: %v\n", err)
+		return false
+	}
+
+	if !resp.Success {
+		fmt.Printf("    └── REPLICATION ERROR: %s\n", resp.Message)
+		return false
+	}
+
+	fmt.Printf("    └── SUCCESS: File '%s' replication initiated from %s to %s (port %s)\n",
+		fileName, source.ID, destination.ID, destination.Port)
+
+	return true
+}
+
 func main() {
 	// Listen on port 50050 for Master Tracker.
 	lis, err := net.Listen("tcp", ":50050")
@@ -265,6 +421,9 @@ func main() {
 
 	// Start the goroutine to check data keeper status
 	go master.checkDataKeeperStatus()
+
+	// Start the goroutine to check and initiate replication
+	go master.checkAndInitiateReplication()
 
 	pb.RegisterDistributedFileSystemServer(grpcServer, master)
 	log.Println("MasterTracker: Server is listening on port 50050...")

@@ -51,6 +51,54 @@ func (d *dataKeeperServer) UploadFile(ctx context.Context, req *pb.UploadFileReq
 	return &pb.UploadFileResponse{Message: "File successfully received and stored."}, nil
 }
 
+// InitiateReplication handles replication requests from the master tracker
+func (d *dataKeeperServer) InitiateReplication(ctx context.Context, req *pb.ReplicationRequest) (*pb.Ack, error) {
+	fmt.Printf("\n[NODE %s] Replication request received:\n", d.id)
+	fmt.Printf("  ├── File: '%s'\n", req.FileName)
+	fmt.Printf("  ├── Source: %s\n", req.SourceDataKeeper)
+	fmt.Printf("  ├── Destination Port: %s\n", req.DestinationDataKeeper)
+
+	dest_port := req.DestinationDataKeeper
+	file_name := req.FileName
+	filePath := fmt.Sprintf("%s/%s/%s", d.storagePath, d.id, file_name) // Use the configured storagePath
+
+	// upload file to the destination port
+	fmt.Printf("  ├── Reading file from: %s\n", filePath)
+	file, err := os.ReadFile(filePath)
+	if err != nil {
+		errMsg := fmt.Sprintf("  └── ERROR: Failed to read file: %v", err)
+		log.Println(errMsg)
+		return &pb.Ack{Success: false, Message: errMsg}, err
+	}
+	fmt.Printf("  ├── Successfully read %d bytes\n", len(file))
+
+	// connect to the destination port
+	fmt.Printf("  ├── Connecting to destination at localhost:%s\n", dest_port)
+	conn, err := grpc.Dial("localhost:"+dest_port, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		errMsg := fmt.Sprintf("  └── ERROR: Failed to connect to destination: %v", err)
+		log.Println(errMsg)
+		return &pb.Ack{Success: false, Message: errMsg}, err
+	}
+	defer conn.Close()
+
+	sourceClient := pb.NewDistributedFileSystemClient(conn)
+	fmt.Printf("  ├── Uploading file to destination...\n")
+
+	// Call the UploadFile RPC
+	uploadResp, err := sourceClient.UploadFile(context.Background(), &pb.UploadFileRequest{FileName: file_name, FileData: file})
+	if err != nil {
+		errMsg := fmt.Sprintf("  └── ERROR: Failed to upload file to destination: %v", err)
+		log.Println(errMsg)
+		return &pb.Ack{Success: false, Message: errMsg}, err
+	}
+
+	successMsg := fmt.Sprintf("  └── SUCCESS: Replicated file '%s' to port %s - %s",
+		file_name, dest_port, uploadResp.Message)
+	log.Println(successMsg)
+	return &pb.Ack{Success: true, Message: successMsg}, nil
+}
+
 // notifyMasterOfUpload informs the master tracker that the file upload is complete.
 func notifyMasterOfUpload(masterIP, masterPort, fileName, dataKeeperID, filePath string) {
 	// Connect to the master tracker
@@ -107,7 +155,7 @@ func (d *dataKeeperServer) sendHeartbeats() {
 		if err != nil {
 			log.Printf("DataKeeper %s: Failed to send heartbeat: %v", d.id, err)
 		} else {
-			log.Printf("DataKeeper %s: Heartbeat sent successfully with ports %v", d.id, d.ports)
+			// log.Printf("DataKeeper %s: Heartbeat sent successfully with ports %v", d.id, d.ports)
 		}
 
 		conn.Close()
@@ -139,7 +187,7 @@ func main() {
 	portsStr := flag.String("ports", "50051", "Space-separated list of ports to listen on")
 	masterIP := flag.String("master_ip", "127.0.0.1", "IP address of the master tracker")
 	masterPort := flag.String("master_port", "50050", "Port of the master tracker")
-	storagePath := flag.String("storage", "./uploading_folder", "Path for storage")
+	storagePath := flag.String("storage", "./data_keeper", "Path for storage")
 
 	flag.Parse()
 

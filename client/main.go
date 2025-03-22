@@ -45,7 +45,7 @@ func main() {
 			var path string
 			fmt.Scanln(&path)
 
-			fmt.Println("Client: Please enter the file path:")
+			fmt.Println("Client: Please enter the file name:")
 			var name string
 			fmt.Scanln(&name)
 
