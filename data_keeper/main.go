@@ -46,7 +46,7 @@ func (d *dataKeeperServer) UploadFile(ctx context.Context, req *pb.UploadFileReq
 	}
 
 	// Notify the master tracker of the upload
-	go notifyMasterOfUpload(d.masterIP, d.masterPort, req.FileName, d.id, filePath)
+	go notifyMasterOfUpload(d.masterIP, d.masterPort, req.FileName, d.id, filePath, req.UploadToken)
 
 	return &pb.UploadFileResponse{Message: "File successfully received and stored."}, nil
 }
@@ -100,7 +100,7 @@ func (d *dataKeeperServer) InitiateReplication(ctx context.Context, req *pb.Repl
 }
 
 // notifyMasterOfUpload informs the master tracker that the file upload is complete.
-func notifyMasterOfUpload(masterIP, masterPort, fileName, dataKeeperID, filePath string) {
+func notifyMasterOfUpload(masterIP, masterPort, fileName, dataKeeperID, filePath, uploadToken string) {
 	// Connect to the master tracker
 	masterAddr := fmt.Sprintf("%s:%s", masterIP, masterPort)
 	conn, err := grpc.Dial(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -115,6 +115,7 @@ func notifyMasterOfUpload(masterIP, masterPort, fileName, dataKeeperID, filePath
 		FileName:     fileName,
 		DataKeeperId: dataKeeperID,
 		FilePath:     filePath,
+		UploadToken:  uploadToken,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -181,6 +182,28 @@ func startServer(keeper *dataKeeperServer, port string, wg *sync.WaitGroup) {
 	}
 }
 
+// DownloadFile handles file download requests from clients
+func (d *dataKeeperServer) DownloadFile(ctx context.Context, req *pb.DownloadRequest) (*pb.DownloadResponse, error) {
+	fileName := req.FileName
+	storagePath := d.storagePath + "/" + d.id + "/"
+	filePath := fmt.Sprintf("%s/%s", storagePath, fileName)
+
+	fmt.Printf("DataKeeper %s: Received download request for file '%s'\n", d.id, fileName)
+
+	// Check if the file exists
+	fileData, err := os.ReadFile(filePath)
+	if err != nil {
+		log.Printf("DataKeeper %s: Error reading file for download: %v", d.id, err)
+		return nil, fmt.Errorf("file not found or cannot be read: %v", err)
+	}
+
+	fmt.Printf("DataKeeper %s: Successfully serving file '%s' (%d bytes)\n",
+		d.id, fileName, len(fileData))
+
+	return &pb.DownloadResponse{
+		FileData: fileData,
+	}, nil
+}
 func main() {
 	// Parse command line arguments
 	id := flag.String("name", "DataKeeper-1", "Unique identifier for this data keeper node")

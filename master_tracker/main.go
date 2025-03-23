@@ -21,6 +21,7 @@ type masterTrackerServer struct {
 	mu          sync.Mutex
 	lookupTable map[string]*fileInfo       // Mapping file name -> file information
 	dataKeepers map[string]*dataKeeperInfo // Information about all data keepers
+	fileOwners  map[string]string          // Maps fileName -> clientId
 }
 
 // fileInfo represents an entry in the lookup table for a file
@@ -120,6 +121,20 @@ func (m *masterTrackerServer) ConfirmUpload(ctx context.Context, confirmation *p
 			DataKeepers: make(map[string]string),
 		}
 		m.lookupTable[confirmation.FileName] = fileRecord
+
+		// Extract clientId from the token that was used during upload
+		// The token format is "clientId-timestamp"
+		// parts := strings.Split(confirmation.UploadToken, "-")
+		// if len(parts) >= 1 {
+		// 	clientId := parts[0]
+		// 	m.fileOwners[confirmation.FileName] = clientId
+		// 	fmt.Printf("MasterTracker: File '%s' ownership assigned to client '%s'\n",
+		// 		confirmation.FileName, clientId)
+		// }
+		m.fileOwners[confirmation.FileName] = confirmation.UploadToken
+		fmt.Printf("MasterTracker: File '%s' ownership assigned to client '%s'\n",
+			confirmation.FileName, confirmation.UploadToken)
+
 	}
 
 	// Record which data keeper has this file and where
@@ -219,11 +234,24 @@ func (m *masterTrackerServer) RequestDownloadInfo(ctx context.Context, req *pb.D
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// First check if the file exists
 	fileInfo, exists := m.lookupTable[req.FileName]
 	if !exists {
 		return &pb.DownloadInfoResponse{
 			AvailableDataKeepers: []*pb.MachineInfo{},
-			FileSize:             0,
+			AccessDenied:         false,
+			Message:              "File not found.",
+		}, nil
+	}
+
+	// Check if the client has permission to access this file
+	owner, exists := m.fileOwners[req.FileName]
+	fmt.Printf("Client %s requested download info for file '%s' whcih has owner '%s'\n", req.ClientId, req.FileName, owner)
+	if !exists || owner != req.ClientId {
+		return &pb.DownloadInfoResponse{
+			AvailableDataKeepers: []*pb.MachineInfo{},
+			AccessDenied:         true,
+			Message:              "You don't have permission to download this file.",
 		}, nil
 	}
 
@@ -233,21 +261,24 @@ func (m *masterTrackerServer) RequestDownloadInfo(ctx context.Context, req *pb.D
 	for keeperID := range fileInfo.DataKeepers {
 		keeper, exists := m.dataKeepers[keeperID]
 		if exists && keeper.IsAlive {
+			// Use a random port from the available ports for load balancing
+			port := keeper.Port
+			if len(keeper.AvailablePorts) > 0 {
+				port = keeper.AvailablePorts[rand.Intn(len(keeper.AvailablePorts))]
+			}
+
 			machineInfo := &pb.MachineInfo{
 				Ip:   keeper.IP,
-				Port: keeper.Port,
+				Port: port,
 			}
 			availableKeepers = append(availableKeepers, machineInfo)
 		}
 	}
 
-	// In a real system, you'd get actual file size
-	// For now we'll use a placeholder
-	fileSize := 1024.0 // 1KB placeholder
-
 	return &pb.DownloadInfoResponse{
 		AvailableDataKeepers: availableKeepers,
-		FileSize:             fileSize,
+		AccessDenied:         false,
+		Message:              fmt.Sprintf("Found %d available data keepers for file '%s'", len(availableKeepers), req.FileName),
 	}, nil
 }
 
@@ -417,6 +448,7 @@ func main() {
 	master := &masterTrackerServer{
 		lookupTable: make(map[string]*fileInfo),
 		dataKeepers: make(map[string]*dataKeeperInfo),
+		fileOwners:  make(map[string]string),
 	}
 
 	// Start the goroutine to check data keeper status

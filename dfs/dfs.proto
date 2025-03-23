@@ -49,6 +49,7 @@ message UploadPermissionResponse {
 message UploadFileRequest {
     string file_name = 1;
     bytes file_data = 2;
+    string upload_token = 3;
 }
 
 message UploadFileResponse {
@@ -59,6 +60,7 @@ message UploadConfirmation {
     string file_name = 1;
     string data_keeper_id = 2;
     string file_path = 3;
+    string upload_token = 4;   // Added to track file ownership
 }
 
 message ClientNotification {
@@ -68,11 +70,13 @@ message ClientNotification {
 // ======= DOWNLOAD PROCESS =======
 message DownloadInfoRequest {
     string file_name = 1;
+    string client_id = 2; // Added for access control
 }
 
 message DownloadInfoResponse {
     repeated MachineInfo available_data_keepers = 1;
-    double file_size = 2;
+    bool access_denied = 2;    // Added for access control
+    string message = 3;        // Added for status messages
 }
 
 message DownloadRequest {
