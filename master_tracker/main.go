@@ -40,6 +40,8 @@ type dataKeeperInfo struct {
 	LastSeen       int64 // Unix timestamp of last heartbeat
 }
 
+//////////////////////gRPC methods //////////////////////////
+
 // RequestUploadPermission is called by the client to get an available Data Keeper for upload.
 func (m *masterTrackerServer) RequestUploadPermission(ctx context.Context, req *pb.UploadPermissionRequest) (*pb.UploadPermissionResponse, error) {
 	m.mu.Lock()
@@ -121,24 +123,38 @@ func (m *masterTrackerServer) ConfirmUpload(ctx context.Context, confirmation *p
 			DataKeepers: make(map[string]string),
 		}
 		m.lookupTable[confirmation.FileName] = fileRecord
-
-		// Extract clientId from the token that was used during upload
-		// The token format is "clientId-timestamp"
-		// parts := strings.Split(confirmation.UploadToken, "-")
-		// if len(parts) >= 1 {
-		// 	clientId := parts[0]
-		// 	m.fileOwners[confirmation.FileName] = clientId
-		// 	fmt.Printf("MasterTracker: File '%s' ownership assigned to client '%s'\n",
-		// 		confirmation.FileName, clientId)
-		// }
 		m.fileOwners[confirmation.FileName] = confirmation.UploadToken
 		fmt.Printf("MasterTracker: File '%s' ownership assigned to client '%s'\n",
 			confirmation.FileName, confirmation.UploadToken)
-
 	}
-
-	// Record which data keeper has this file and where
 	fileRecord.DataKeepers[confirmation.DataKeeperId] = confirmation.FilePath
+	// After file ownership is assigned, notify the client of successful upload
+	if !exists {
+		clientConn, err := grpc.Dial("localhost:50057", grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			log.Printf("MasterTracker: failed to connect to client for notification: %v", err)
+			return &pb.Ack{Success: false, Message: "failed to connect to client for notification"}, err
+		}
+		defer clientConn.Close()
+
+		// Create client and send notification
+		clientService := pb.NewDistributedFileSystemClient(clientConn)
+		notification := &pb.ClientNotification{
+			Message: fmt.Sprintf("File '%s' has been successfully uploaded and registered", confirmation.FileName),
+		}
+
+		// ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
+		// defer cancel()
+
+		_, err = clientService.NotifyClientUploadCompletion(ctx, notification)
+		if err != nil {
+			log.Printf("MasterTracker: failed to notify client about upload: %v", err)
+			return &pb.Ack{Success: false, Message: "failed to notify client about upload"}, err
+		}
+
+		fmt.Printf("MasterTracker: Client %s was notified about successful upload of '%s'\n",
+			confirmation.UploadToken, confirmation.FileName)
+	}
 
 	fmt.Printf("MasterTracker: Confirmed upload for file '%s' from DataKeeper '%s'.\n",
 		confirmation.FileName, confirmation.DataKeeperId)
@@ -158,7 +174,7 @@ func (m *masterTrackerServer) SendHeartbeat(ctx context.Context, req *pb.Heartbe
 	keeper, exists := m.dataKeepers[dataKeeperID]
 	if !exists {
 		// If this is a new data keeper, create an entry for it
-		// Extract IP from peer info or use default
+		// Extract IP from peer info
 		ip := "127.0.0.1"
 		port := "50051"
 
@@ -197,36 +213,6 @@ func (m *masterTrackerServer) SendHeartbeat(ctx context.Context, req *pb.Heartbe
 	}
 
 	return &pb.Ack{Success: true, Message: "Heartbeat acknowledged"}, nil
-}
-
-// NotifyClientUploadCompletion can be used to notify the client once the upload is registered.
-func (m *masterTrackerServer) NotifyClientUploadCompletion(ctx context.Context, notification *pb.ClientNotification) (*pb.Ack, error) {
-	fmt.Printf("MasterTracker: Notifying client - %s\n", notification.Message)
-	return &pb.Ack{Success: true, Message: "Client notified of upload completion."}, nil
-}
-
-// checkDataKeeperStatus periodically checks if data keepers are still alive
-func (m *masterTrackerServer) checkDataKeeperStatus() {
-	heartbeatTimeout := int64(3) // Consider a data keeper dead after 3 seconds without heartbeat
-
-	for {
-		time.Sleep(1 * time.Second)
-
-		m.mu.Lock()
-		currentTime := time.Now().Unix()
-
-		for id, keeper := range m.dataKeepers {
-			// If we haven't received a heartbeat in the timeout period, mark as not alive
-			if currentTime-keeper.LastSeen > heartbeatTimeout {
-				if keeper.IsAlive {
-					keeper.IsAlive = false
-					fmt.Printf("MasterTracker: Data Keeper %s is now considered offline\n", id)
-				}
-			}
-		}
-
-		m.mu.Unlock()
-	}
 }
 
 // RequestDownloadInfo provides information about available data keepers that have the requested file
@@ -281,6 +267,35 @@ func (m *masterTrackerServer) RequestDownloadInfo(ctx context.Context, req *pb.D
 		Message:              fmt.Sprintf("Found %d available data keepers for file '%s'", len(availableKeepers), req.FileName),
 	}, nil
 }
+
+func main() {
+	// Listen on port 50050 for Master Tracker.
+	lis, err := net.Listen("tcp", ":50050")
+	if err != nil {
+		log.Fatalf("MasterTracker: failed to listen: %v", err)
+	}
+
+	grpcServer := grpc.NewServer()
+	master := &masterTrackerServer{
+		lookupTable: make(map[string]*fileInfo),
+		dataKeepers: make(map[string]*dataKeeperInfo),
+		fileOwners:  make(map[string]string),
+	}
+
+	// Start the goroutine to check data keeper status
+	go master.checkDataKeeperStatus()
+
+	// Start the goroutine to check and initiate replication
+	go master.checkAndInitiateReplication()
+
+	pb.RegisterDistributedFileSystemServer(grpcServer, master)
+	log.Println("MasterTracker: Server is listening on port 50050...")
+	if err := grpcServer.Serve(lis); err != nil {
+		log.Fatalf("MasterTracker: failed to serve: %v", err)
+	}
+}
+
+// //////// Helpers  //////////
 
 // checkAndInitiateReplication periodically checks and initiates replication for files with less than 3 copies
 func (m *masterTrackerServer) checkAndInitiateReplication() {
@@ -437,29 +452,26 @@ func (m *masterTrackerServer) notifyMachineDataTransfer(source, destination *dat
 	return true
 }
 
-func main() {
-	// Listen on port 50050 for Master Tracker.
-	lis, err := net.Listen("tcp", ":50050")
-	if err != nil {
-		log.Fatalf("MasterTracker: failed to listen: %v", err)
-	}
+// checkDataKeeperStatus periodically checks if data keepers are still alive
+func (m *masterTrackerServer) checkDataKeeperStatus() {
+	heartbeatTimeout := int64(3) // Consider a data keeper dead after 3 seconds without heartbeat
 
-	grpcServer := grpc.NewServer()
-	master := &masterTrackerServer{
-		lookupTable: make(map[string]*fileInfo),
-		dataKeepers: make(map[string]*dataKeeperInfo),
-		fileOwners:  make(map[string]string),
-	}
+	for {
+		time.Sleep(1 * time.Second)
 
-	// Start the goroutine to check data keeper status
-	go master.checkDataKeeperStatus()
+		m.mu.Lock()
+		currentTime := time.Now().Unix()
 
-	// Start the goroutine to check and initiate replication
-	go master.checkAndInitiateReplication()
+		for id, keeper := range m.dataKeepers {
+			// If we haven't received a heartbeat in the timeout period, mark as not alive
+			if currentTime-keeper.LastSeen > heartbeatTimeout {
+				if keeper.IsAlive {
+					keeper.IsAlive = false
+					fmt.Printf("MasterTracker: Data Keeper %s is now considered offline\n", id)
+				}
+			}
+		}
 
-	pb.RegisterDistributedFileSystemServer(grpcServer, master)
-	log.Println("MasterTracker: Server is listening on port 50050...")
-	if err := grpcServer.Serve(lis); err != nil {
-		log.Fatalf("MasterTracker: failed to serve: %v", err)
+		m.mu.Unlock()
 	}
 }

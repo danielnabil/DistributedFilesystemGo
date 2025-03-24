@@ -27,6 +27,8 @@ type dataKeeperServer struct {
 	storagePath string
 }
 
+///////////gRPC methods////////
+
 // UploadFile receives the file data from the client.
 func (d *dataKeeperServer) UploadFile(ctx context.Context, req *pb.UploadFileRequest) (*pb.UploadFileResponse, error) {
 	fmt.Printf("DataKeeper %s: Received file upload request for '%s' (size: %d bytes).\n",
@@ -46,7 +48,7 @@ func (d *dataKeeperServer) UploadFile(ctx context.Context, req *pb.UploadFileReq
 	}
 
 	// Notify the master tracker of the upload
-	go notifyMasterOfUpload(d.masterIP, d.masterPort, req.FileName, d.id, filePath, req.UploadToken)
+	notifyMasterOfUpload(d.masterIP, d.masterPort, req.FileName, d.id, filePath, req.UploadToken)
 
 	return &pb.UploadFileResponse{Message: "File successfully received and stored."}, nil
 }
@@ -97,89 +99,6 @@ func (d *dataKeeperServer) InitiateReplication(ctx context.Context, req *pb.Repl
 		file_name, dest_port, uploadResp.Message)
 	log.Println(successMsg)
 	return &pb.Ack{Success: true, Message: successMsg}, nil
-}
-
-// notifyMasterOfUpload informs the master tracker that the file upload is complete.
-func notifyMasterOfUpload(masterIP, masterPort, fileName, dataKeeperID, filePath, uploadToken string) {
-	// Connect to the master tracker
-	masterAddr := fmt.Sprintf("%s:%s", masterIP, masterPort)
-	conn, err := grpc.Dial(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		log.Printf("DataKeeper %s: failed to connect to master tracker: %v", dataKeeperID, err)
-		return
-	}
-	defer conn.Close()
-
-	client := pb.NewDistributedFileSystemClient(conn)
-	confirmation := &pb.UploadConfirmation{
-		FileName:     fileName,
-		DataKeeperId: dataKeeperID,
-		FilePath:     filePath,
-		UploadToken:  uploadToken,
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	resp, err := client.ConfirmUpload(ctx, confirmation)
-	if err != nil {
-		log.Printf("DataKeeper %s: error notifying master tracker: %v", dataKeeperID, err)
-		return
-	}
-
-	fmt.Printf("DataKeeper %s: Master Tracker responded: %s\n", dataKeeperID, resp.Message)
-}
-
-// sendHeartbeats periodically sends heartbeat signals to the master tracker
-func (d *dataKeeperServer) sendHeartbeats() {
-	masterAddr := fmt.Sprintf("%s:%s", d.masterIP, d.masterPort)
-
-	for {
-		conn, err := grpc.Dial(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
-		if err != nil {
-			log.Printf("DataKeeper %s: Failed to connect to master tracker for heartbeat: %v", d.id, err)
-			time.Sleep(1 * time.Second)
-			continue
-		}
-
-		client := pb.NewDistributedFileSystemClient(conn)
-
-		heartbeatReq := &pb.HeartbeatRequest{
-			DataKeeperId:   d.id,
-			AvailablePorts: d.ports,
-		}
-
-		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-		_, err = client.SendHeartbeat(ctx, heartbeatReq)
-		cancel()
-
-		if err != nil {
-			log.Printf("DataKeeper %s: Failed to send heartbeat: %v", d.id, err)
-		} else {
-			// log.Printf("DataKeeper %s: Heartbeat sent successfully with ports %v", d.id, d.ports)
-		}
-
-		conn.Close()
-		time.Sleep(1 * time.Second) // Send heartbeat every second
-	}
-}
-
-// startServer starts a gRPC server on the given port
-func startServer(keeper *dataKeeperServer, port string, wg *sync.WaitGroup) {
-	defer wg.Done()
-
-	lis, err := net.Listen("tcp", ":"+port)
-	if err != nil {
-		log.Fatalf("DataKeeper %s: failed to listen on port %s: %v", keeper.id, port, err)
-	}
-
-	grpcServer := grpc.NewServer()
-	pb.RegisterDistributedFileSystemServer(grpcServer, keeper)
-
-	log.Printf("DataKeeper %s: Server is listening on port %s...", keeper.id, port)
-	if err := grpcServer.Serve(lis); err != nil {
-		log.Fatalf("DataKeeper %s: failed to serve on port %s: %v", keeper.id, port, err)
-	}
 }
 
 // DownloadFile handles file download requests from clients
@@ -243,4 +162,89 @@ func main() {
 
 	// Wait for all servers to finish (which shouldn't happen unless there's an error)
 	wg.Wait()
+}
+
+///////////Helpers methods////////
+
+// notifyMasterOfUpload informs the master tracker that the file upload is complete.
+func notifyMasterOfUpload(masterIP, masterPort, fileName, dataKeeperID, filePath, uploadToken string) {
+	// Connect to the master tracker
+	masterAddr := fmt.Sprintf("%s:%s", masterIP, masterPort)
+	conn, err := grpc.Dial(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		log.Printf("DataKeeper %s: failed to connect to master tracker: %v", dataKeeperID, err)
+		return
+	}
+	defer conn.Close()
+
+	client := pb.NewDistributedFileSystemClient(conn)
+	confirmation := &pb.UploadConfirmation{
+		FileName:     fileName,
+		DataKeeperId: dataKeeperID,
+		FilePath:     filePath,
+		UploadToken:  uploadToken,
+	}
+
+	// ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// defer cancel()
+
+	resp, err := client.ConfirmUpload(context.Background(), confirmation)
+	if err != nil {
+		log.Printf("DataKeeper %s: error notifying master tracker: %v", dataKeeperID, err)
+		return
+	}
+
+	fmt.Printf("DataKeeper %s: Master Tracker responded: %s\n", dataKeeperID, resp.Message)
+}
+
+// sendHeartbeats periodically sends heartbeat signals to the master tracker
+func (d *dataKeeperServer) sendHeartbeats() {
+	masterAddr := fmt.Sprintf("%s:%s", d.masterIP, d.masterPort)
+
+	for {
+		conn, err := grpc.Dial(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		if err != nil {
+			log.Printf("DataKeeper %s: Failed to connect to master tracker for heartbeat: %v", d.id, err)
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		client := pb.NewDistributedFileSystemClient(conn)
+
+		heartbeatReq := &pb.HeartbeatRequest{
+			DataKeeperId:   d.id,
+			AvailablePorts: d.ports,
+		}
+
+		// ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+		_, err = client.SendHeartbeat(context.Background(), heartbeatReq)
+		// cancel()
+
+		if err != nil {
+			log.Printf("DataKeeper %s: Failed to send heartbeat: %v", d.id, err)
+		} else {
+			// log.Printf("DataKeeper %s: Heartbeat sent successfully with ports %v", d.id, d.ports)
+		}
+
+		conn.Close()
+		time.Sleep(1 * time.Second) // Send heartbeat every second
+	}
+}
+
+// startServer starts a gRPC server on the given port
+func startServer(keeper *dataKeeperServer, port string, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	lis, err := net.Listen("tcp", ":"+port)
+	if err != nil {
+		log.Fatalf("DataKeeper %s: failed to listen on port %s: %v", keeper.id, port, err)
+	}
+
+	grpcServer := grpc.NewServer()
+	pb.RegisterDistributedFileSystemServer(grpcServer, keeper)
+
+	log.Printf("DataKeeper %s: Server is listening on port %s...", keeper.id, port)
+	if err := grpcServer.Serve(lis); err != nil {
+		log.Fatalf("DataKeeper %s: failed to serve on port %s: %v", keeper.id, port, err)
+	}
 }

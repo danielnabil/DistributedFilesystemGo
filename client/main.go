@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
+	"net"
 	"os"
 	"path/filepath"
+	"strings"
 
 	pb "DistributedFileSystem/dfs"
 
@@ -15,13 +17,37 @@ import (
 )
 
 const (
-	clientId = "Client"
+	clientId   = "Client"
+	clientPort = "50057" // Port that the client will listen on for notifications
 )
+
+type clientServer struct {
+	pb.UnimplementedDistributedFileSystemServer
+	notificationChan chan string // Channel to communicate notifications to main thread
+}
+
+// NotifyClientUploadCompletion can be used to notify the client once the upload is registered.
+func (c *clientServer) NotifyClientUploadCompletion(ctx context.Context, notification *pb.ClientNotification) (*pb.Ack, error) {
+	fmt.Printf("\nClient: Upload successful - %s\n", notification.Message)
+
+	// Send notification to main thread if needed
+	if c.notificationChan != nil {
+		c.notificationChan <- notification.Message
+	}
+
+	return &pb.Ack{Success: true, Message: "Client notified of upload completion."}, nil
+}
 
 // trackUploadedFiles maintains a record of files uploaded by this client
 var uploadedFiles = make(map[string]string) // Maps fileName -> uploadToken
 
 func main() {
+	// Create notification channel
+	notificationChan := make(chan string, 10)
+
+	// Start the client's gRPC server in a goroutine
+	go startClientServer(notificationChan)
+
 	// Connect to Master Tracker
 	masterConn, err := grpc.Dial("localhost:50050", grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -29,6 +55,9 @@ func main() {
 	}
 	defer masterConn.Close()
 	masterClient := pb.NewDistributedFileSystemClient(masterConn)
+
+	// Uncomment these to have persistence for uploaded files
+	loadUploadedFilesList()
 
 	for {
 		// Display main menu
@@ -48,13 +77,41 @@ func main() {
 		case "2":
 			downloadFile(masterClient)
 		case "3":
-			// listMyFiles()
+			listMyFiles()
 		case "4", "exit", "quit":
 			fmt.Println("Exiting program.")
 			return
 		default:
 			fmt.Println("Invalid choice. Please enter a number from 1-4.")
 		}
+
+		// // Check for any notifications (non-blocking)
+		// select {
+		// case msg := <-notificationChan:
+		// 	fmt.Printf("Notification received: %s\n", msg)
+		// default:
+		// 	// No notification, continue
+		// }
+	}
+}
+
+// startClientServer starts the gRPC server for handling notifications
+func startClientServer(notificationChan chan string) {
+	lis, err := net.Listen("tcp", ":"+clientPort)
+	if err != nil {
+		log.Fatalf("Client: failed to listen on port %s: %v", clientPort, err)
+	}
+
+	grpcServer := grpc.NewServer()
+	server := &clientServer{
+		notificationChan: notificationChan,
+	}
+
+	pb.RegisterDistributedFileSystemServer(grpcServer, server)
+
+	fmt.Printf("Client: Notification server is listening on port %s...\n", clientPort)
+	if err := grpcServer.Serve(lis); err != nil {
+		log.Fatalf("Client: failed to serve: %v", err)
 	}
 }
 
@@ -108,7 +165,7 @@ func uploadFile(masterClient pb.DistributedFileSystemClient) {
 	}
 
 	fmt.Printf("Client: Uploading file '%s' (%d bytes)...\n", fileName, len(fileData))
-	uploadResp, err := dataKeeperClient.UploadFile(context.Background(), uploadReq)
+	_, err = dataKeeperClient.UploadFile(context.Background(), uploadReq)
 	if err != nil {
 		log.Printf("Client: error uploading file: %v", err)
 		fmt.Println("Upload failed. Please try again.")
@@ -119,13 +176,13 @@ func uploadFile(masterClient pb.DistributedFileSystemClient) {
 	uploadedFiles[fileName] = uploadPermResp.UploadToken
 
 	// Step 7: Save the list of uploaded files to disk for persistence
-	// saveUploadedFilesList()
+	saveUploadedFilesList()
 
-	fmt.Printf("Client: Upload successful - %s\n", uploadResp.Message)
+	// fmt.Printf("Client: File upload initiated. Waiting for confirmation...\n")
 }
 
 func downloadFile(masterClient pb.DistributedFileSystemClient) {
-	// loadUploadedFilesList()
+	loadUploadedFilesList()
 	// Step 1: Show list of files the client has uploaded
 	if len(uploadedFiles) == 0 {
 		fmt.Println("You haven't uploaded any files yet.")
@@ -219,52 +276,52 @@ func downloadFile(masterClient pb.DistributedFileSystemClient) {
 		savePath, len(downloadResp.FileData))
 }
 
-// func listMyFiles() {
-// 	loadUploadedFilesList()
-// 	if len(uploadedFiles) == 0 {
-// 		fmt.Println("You haven't uploaded any files yet.")
-// 		return
-// 	}
+// Implement these functions for persistence of uploaded files
+func listMyFiles() {
+	if len(uploadedFiles) == 0 {
+		fmt.Println("You haven't uploaded any files yet.")
+		return
+	}
 
-// 	fmt.Println("\nYour uploaded files:")
-// 	fmt.Println("--------------------")
-// 	for fileName, token := range uploadedFiles {
-// 		fmt.Printf("File: %s (Token: %s)\n", fileName, token)
-// 	}
-// }
+	fmt.Println("\nYour uploaded files:")
+	fmt.Println("--------------------")
+	for fileName, token := range uploadedFiles {
+		fmt.Printf("File: %s (Token: %s)\n", fileName, token)
+	}
+}
 
-// // saveUploadedFilesList saves the list of uploaded files for persistence
-// func saveUploadedFilesList() {
-// 	var content strings.Builder
-// 	for fileName, token := range uploadedFiles {
-// 		content.WriteString(fmt.Sprintf("%s\t%s\n", fileName, token))
-// 	}
+// saveUploadedFilesList saves the list of uploaded files for persistence
+func saveUploadedFilesList() {
+	var content strings.Builder
+	for fileName, token := range uploadedFiles {
+		content.WriteString(fmt.Sprintf("%s\t%s\n", fileName, token))
+	}
 
-// 	err := os.WriteFile(".uploaded_files", []byte(content.String()), 0644)
-// 	if err != nil {
-// 		log.Printf("Client: error saving uploaded files list: %v", err)
-// 	}
-// }
+	err := os.WriteFile(".uploaded_files", []byte(content.String()), 0644)
+	if err != nil {
+		log.Printf("Client: error saving uploaded files list: %v", err)
+	}
+}
 
-// // loadUploadedFilesList loads the list of previously uploaded files
-// func loadUploadedFilesList() {
-// 	data, err := os.ReadFile(".uploaded_files")
-// 	if err != nil {
-// 		// It's okay if the file doesn't exist yet
-// 		return
-// 	}
+// loadUploadedFilesList loads the list of previously uploaded files
+func loadUploadedFilesList() {
+	data, err := os.ReadFile(".uploaded_files")
+	if err != nil {
+		// It's okay if the file doesn't exist yet
+		return
+	}
 
-// 	lines := strings.Split(string(data), "\n")
-// 	for _, line := range lines {
-// 		if line == "" {
-// 			continue
-// 		}
+	lines := strings.Split(string(data), "\n")
+	for _, line := range lines {
+		if line == "" {
+			continue
+		}
 
-// 		parts := strings.Split(line, "\t")
-// 		if len(parts) == 2 {
-// 			fileName := parts[0]
-// 			token := parts[1]
-// 			uploadedFiles[fileName] = token
-// 		}
-// 	}
-// }
+		parts := strings.Split(line, "\t")
+		if len(parts) == 2 {
+			fileName := parts[0]
+			token := parts[1]
+			uploadedFiles[fileName] = token
+		}
+	}
+}
