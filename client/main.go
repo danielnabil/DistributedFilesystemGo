@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"math/rand"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	pb "DistributedFileSystem/dfs"
 
@@ -17,8 +19,7 @@ import (
 )
 
 const (
-	clientId   = "Client"
-	clientPort = "50057" // Port that the client will listen on for notifications
+	defaultClientPort = "50057"
 )
 
 type clientServer struct {
@@ -26,7 +27,7 @@ type clientServer struct {
 	notificationChan chan string // Channel to communicate notifications to main thread
 }
 
-// NotifyClientUploadCompletion can be used to notify the client once the upload is registered.
+// notify the client once the upload is registered.
 func (c *clientServer) NotifyClientUploadCompletion(ctx context.Context, notification *pb.ClientNotification) (*pb.Ack, error) {
 	fmt.Printf("\nClient: Upload successful - %s\n", notification.Message)
 
@@ -38,15 +39,31 @@ func (c *clientServer) NotifyClientUploadCompletion(ctx context.Context, notific
 	return &pb.Ack{Success: true, Message: "Client notified of upload completion."}, nil
 }
 
-// trackUploadedFiles maintains a record of files uploaded by this client
-var uploadedFiles = make(map[string]string) // Maps fileName -> uploadToken
+// maintains a record of files uploaded by this client
+var uploadedFiles = make(map[string]string) // Maps fileName -> clientId
 
 func main() {
+	clientPort := flag.String("port", defaultClientPort, "Port number to listen for notifications")
+	flag.Parse()
+
+	var username string
+	for {
+		fmt.Print("Enter your username: ")
+		fmt.Scanln(&username)
+		if username != "" {
+			break
+		}
+		fmt.Println("Username cannot be empty. Please try again.")
+	}
+
+	clientId := username
+	fmt.Printf("Welcome, %s!\n", clientId)
+
 	// Create notification channel
 	notificationChan := make(chan string, 10)
 
 	// Start the client's gRPC server in a goroutine
-	go startClientServer(notificationChan)
+	go startClientServer(notificationChan, *clientPort)
 
 	// Connect to Master Tracker
 	masterConn, err := grpc.Dial("localhost:50050", grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -56,11 +73,11 @@ func main() {
 	defer masterConn.Close()
 	masterClient := pb.NewDistributedFileSystemClient(masterConn)
 
-	// Uncomment these to have persistence for uploaded files
-	loadUploadedFilesList()
+	// Load previously uploaded files with user name
+	loadUploadedFilesList(clientId)
 
 	for {
-		// Display main menu
+		//main menu
 		fmt.Println("\n===== Distributed File System Client =====")
 		fmt.Println("1. Upload a file")
 		fmt.Println("2. Download a file")
@@ -73,9 +90,9 @@ func main() {
 
 		switch choice {
 		case "1":
-			uploadFile(masterClient)
+			uploadFile(masterClient, notificationChan, clientId, *clientPort)
 		case "2":
-			downloadFile(masterClient)
+			downloadFile(masterClient, clientId)
 		case "3":
 			listMyFiles()
 		case "4", "exit", "quit":
@@ -84,19 +101,11 @@ func main() {
 		default:
 			fmt.Println("Invalid choice. Please enter a number from 1-4.")
 		}
-
-		// // Check for any notifications (non-blocking)
-		// select {
-		// case msg := <-notificationChan:
-		// 	fmt.Printf("Notification received: %s\n", msg)
-		// default:
-		// 	// No notification, continue
-		// }
 	}
 }
 
-// startClientServer starts the gRPC server for handling notifications
-func startClientServer(notificationChan chan string) {
+// starts the gRPC server for handling notifications from master
+func startClientServer(notificationChan chan string, clientPort string) {
 	lis, err := net.Listen("tcp", ":"+clientPort)
 	if err != nil {
 		log.Fatalf("Client: failed to listen on port %s: %v", clientPort, err)
@@ -115,23 +124,28 @@ func startClientServer(notificationChan chan string) {
 	}
 }
 
-func uploadFile(masterClient pb.DistributedFileSystemClient) {
-	// Step 1: Request upload permission from the Master Tracker
+func uploadFile(masterClient pb.DistributedFileSystemClient, notificationChan chan string, clientId string, clientPort string) {
+	//Request upload permission from the Master Tracker
 	uploadPermReq := &pb.UploadPermissionRequest{ClientId: clientId}
 	uploadPermResp, err := masterClient.RequestUploadPermission(context.Background(), uploadPermReq)
 	if err != nil {
-		log.Printf("Client: error requesting upload permission: %v", err)
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "no data keepers available") {
+			fmt.Println("\nClient: No data keepers are currently available. Please try again later.")
+		} else {
+			fmt.Printf("\nClient: Error requesting upload permission: %v\n", err)
+		}
 		return
 	}
 	fmt.Printf("Client: Received upload token '%s' and assigned Data Keeper at %s:%s\n",
 		uploadPermResp.UploadToken, uploadPermResp.AssignedDataKeeper.Ip, uploadPermResp.AssignedDataKeeper.Port)
 
-	// Step 2: Get file path from user
+	//Get file path from user
 	fmt.Print("Enter the path to the file you want to upload: ")
 	var path string
 	fmt.Scanln(&path)
 
-	// Step 3: Ask for file name to use in the system
+	//Ask for file name to use in the system
 	fileName := filepath.Base(path) // Default to base name from path
 	fmt.Printf("Enter file name to use in the system (default: %s): ", fileName)
 	var customName string
@@ -140,7 +154,7 @@ func uploadFile(masterClient pb.DistributedFileSystemClient) {
 		fileName = customName
 	}
 
-	// Step 4: Read file data
+	//Read file data
 	fileData, err := os.ReadFile(path)
 	if err != nil {
 		log.Printf("Client: unable to read file '%s', Error: %v", path, err)
@@ -148,7 +162,7 @@ func uploadFile(masterClient pb.DistributedFileSystemClient) {
 		return
 	}
 
-	// Step 5: Connect to assigned Data Keeper and upload the file
+	//Connect to assigned Data Keeper and upload the file
 	dataKeeperAddr := fmt.Sprintf("%s:%s", uploadPermResp.AssignedDataKeeper.Ip, uploadPermResp.AssignedDataKeeper.Port)
 	dataKeeperConn, err := grpc.Dial(dataKeeperAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -162,6 +176,7 @@ func uploadFile(masterClient pb.DistributedFileSystemClient) {
 		FileName:    fileName,
 		FileData:    fileData,
 		UploadToken: uploadPermResp.UploadToken,
+		ClientPort:  clientPort,
 	}
 
 	fmt.Printf("Client: Uploading file '%s' (%d bytes)...\n", fileName, len(fileData))
@@ -172,18 +187,26 @@ func uploadFile(masterClient pb.DistributedFileSystemClient) {
 		return
 	}
 
-	// Step 6: Update local record of uploaded files
+	fmt.Println("Waiting for upload confirmation...")
+
+	// Set a timeout of 30 seconds for upload confirmation
+	select {
+	case msg := <-notificationChan:
+		fmt.Printf("Upload completed: %s\n", msg)
+	case <-time.After(30 * time.Second):
+		fmt.Println("Upload confirmation timed out, but file transfer was successful.")
+	}
+
+	//Update local record of uploaded files to track ownership
 	uploadedFiles[fileName] = uploadPermResp.UploadToken
 
-	// Step 7: Save the list of uploaded files to disk for persistence
-	saveUploadedFilesList()
-
-	// fmt.Printf("Client: File upload initiated. Waiting for confirmation...\n")
+	//Save the list of uploaded files to disk
+	saveUploadedFilesList(clientId)
 }
 
-func downloadFile(masterClient pb.DistributedFileSystemClient) {
-	loadUploadedFilesList()
-	// Step 1: Show list of files the client has uploaded
+func downloadFile(masterClient pb.DistributedFileSystemClient, clientId string) {
+	loadUploadedFilesList(clientId)
+	//Show list of files the client has uploaded
 	if len(uploadedFiles) == 0 {
 		fmt.Println("You haven't uploaded any files yet.")
 		return
@@ -196,12 +219,11 @@ func downloadFile(masterClient pb.DistributedFileSystemClient) {
 		fmt.Printf("- %s\n", fileName)
 	}
 
-	// Step 2: Ask user which file to download
 	fmt.Print("Enter the name of the file to download: ")
 	var fileName string
 	fmt.Scanln(&fileName)
 
-	// Step 3: Request download info from master tracker
+	//Request download info from master tracker
 	downloadInfoReq := &pb.DownloadInfoRequest{
 		FileName: fileName,
 		ClientId: uploadedFiles[fileName],
@@ -214,23 +236,22 @@ func downloadFile(masterClient pb.DistributedFileSystemClient) {
 		return
 	}
 
-	// Step 4: Check if access is allowed
 	if downloadInfoResp.AccessDenied {
 		fmt.Printf("Access denied: %s\n", downloadInfoResp.Message)
 		return
 	}
 
-	// Step 5: Check if the file exists and has available keepers
+	//Check if the file exists and has available keepers
 	if len(downloadInfoResp.AvailableDataKeepers) == 0 {
 		fmt.Printf("No data keepers available for file '%s'. %s\n", fileName, downloadInfoResp.Message)
 		return
 	}
 
-	// Step 6: Select a random data keeper for load balancing
+	//Select a random data keeper for download
 	keeper := downloadInfoResp.AvailableDataKeepers[rand.Intn(len(downloadInfoResp.AvailableDataKeepers))]
 	fmt.Printf("Client: Selected data keeper at %s:%s for download\n", keeper.Ip, keeper.Port)
 
-	// Step 7: Connect to the selected data keeper
+	//Connect to the selected data keeper
 	dataKeeperAddr := fmt.Sprintf("%s:%s", keeper.Ip, keeper.Port)
 	dataKeeperConn, err := grpc.Dial(dataKeeperAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -239,7 +260,7 @@ func downloadFile(masterClient pb.DistributedFileSystemClient) {
 	}
 	defer dataKeeperConn.Close()
 
-	// Step 8: Request the file download
+	//Request the file download from datakeeper
 	dataKeeperClient := pb.NewDistributedFileSystemClient(dataKeeperConn)
 	downloadReq := &pb.DownloadRequest{
 		FileName: fileName,
@@ -252,16 +273,15 @@ func downloadFile(masterClient pb.DistributedFileSystemClient) {
 		return
 	}
 
-	// Step 9: Create client directory and save the downloaded file
-	clientDir := filepath.Join(".", "client", uploadedFiles[fileName])
+	//Create client directory and save the downloaded file
+	clientDir := filepath.Join(".", "client", clientId)
 
-	// Ensure the client directory exists
+	// Ensure the client directory exists or create it
 	if err := os.MkdirAll(clientDir, 0755); err != nil {
 		log.Printf("Client: error creating client directory: %v", err)
 		return
 	}
 
-	// Default save path is in the client directory
 	savePath := filepath.Join(clientDir, fileName)
 
 	fmt.Printf("Saving file to: %s\n", savePath)
@@ -276,7 +296,6 @@ func downloadFile(masterClient pb.DistributedFileSystemClient) {
 		savePath, len(downloadResp.FileData))
 }
 
-// Implement these functions for persistence of uploaded files
 func listMyFiles() {
 	if len(uploadedFiles) == 0 {
 		fmt.Println("You haven't uploaded any files yet.")
@@ -290,24 +309,23 @@ func listMyFiles() {
 	}
 }
 
-// saveUploadedFilesList saves the list of uploaded files for persistence
-func saveUploadedFilesList() {
+func saveUploadedFilesList(clientId string) {
 	var content strings.Builder
 	for fileName, token := range uploadedFiles {
 		content.WriteString(fmt.Sprintf("%s\t%s\n", fileName, token))
 	}
 
-	err := os.WriteFile(".uploaded_files", []byte(content.String()), 0644)
+	filePath := fmt.Sprintf(".%s_uploaded_files", clientId)
+	err := os.WriteFile(filePath, []byte(content.String()), 0644)
 	if err != nil {
 		log.Printf("Client: error saving uploaded files list: %v", err)
 	}
 }
 
-// loadUploadedFilesList loads the list of previously uploaded files
-func loadUploadedFilesList() {
-	data, err := os.ReadFile(".uploaded_files")
+func loadUploadedFilesList(clientId string) {
+	filePath := fmt.Sprintf(".%s_uploaded_files", clientId)
+	data, err := os.ReadFile(filePath)
 	if err != nil {
-		// It's okay if the file doesn't exist yet
 		return
 	}
 

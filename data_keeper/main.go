@@ -17,24 +17,23 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// dataKeeperServer implements the DistributedFileSystem gRPC service for the data keeper.
 type dataKeeperServer struct {
 	pb.UnimplementedDistributedFileSystemServer
-	id          string // unique identifier for the data keeper
+	id          string
 	masterIP    string
 	masterPort  string
-	ports       []string // available ports for this data keeper
+	ports       []string
 	storagePath string
 }
 
 ///////////gRPC methods////////
 
-// UploadFile receives the file data from the client.
+// receive the file data from the client.
 func (d *dataKeeperServer) UploadFile(ctx context.Context, req *pb.UploadFileRequest) (*pb.UploadFileResponse, error) {
 	fmt.Printf("DataKeeper %s: Received file upload request for '%s' (size: %d bytes).\n",
 		d.id, req.FileName, len(req.FileData))
 	storagePath := d.storagePath + "/" + d.id + "/"
-	// Create file storage path if it doesn't exist
+
 	if err := os.MkdirAll(storagePath, 0755); err != nil {
 		log.Printf("DataKeeper %s: Error creating storage directory: %v", d.id, err)
 		return nil, fmt.Errorf("storage error: %v", err)
@@ -47,13 +46,12 @@ func (d *dataKeeperServer) UploadFile(ctx context.Context, req *pb.UploadFileReq
 		return nil, fmt.Errorf("file write error: %v", err)
 	}
 
-	// Notify the master tracker of the upload
-	notifyMasterOfUpload(d.masterIP, d.masterPort, req.FileName, d.id, filePath, req.UploadToken)
+	go notifyMasterOfUpload(d.masterIP, d.masterPort, req.FileName, d.id, filePath, req.UploadToken, req.ClientPort)
 
 	return &pb.UploadFileResponse{Message: "File successfully received and stored."}, nil
 }
 
-// InitiateReplication handles replication requests from the master tracker
+// handles replication requests from the master tracker
 func (d *dataKeeperServer) InitiateReplication(ctx context.Context, req *pb.ReplicationRequest) (*pb.Ack, error) {
 	fmt.Printf("\n[NODE %s] Replication request received:\n", d.id)
 	fmt.Printf("  ├── File: '%s'\n", req.FileName)
@@ -62,7 +60,7 @@ func (d *dataKeeperServer) InitiateReplication(ctx context.Context, req *pb.Repl
 
 	dest_port := req.DestinationDataKeeper
 	file_name := req.FileName
-	filePath := fmt.Sprintf("%s/%s/%s", d.storagePath, d.id, file_name) // Use the configured storagePath
+	filePath := fmt.Sprintf("%s/%s/%s", d.storagePath, d.id, file_name)
 
 	// upload file to the destination port
 	fmt.Printf("  ├── Reading file from: %s\n", filePath)
@@ -101,7 +99,7 @@ func (d *dataKeeperServer) InitiateReplication(ctx context.Context, req *pb.Repl
 	return &pb.Ack{Success: true, Message: successMsg}, nil
 }
 
-// DownloadFile handles file download requests from clients
+// handles file download requests from clients
 func (d *dataKeeperServer) DownloadFile(ctx context.Context, req *pb.DownloadRequest) (*pb.DownloadResponse, error) {
 	fileName := req.FileName
 	storagePath := d.storagePath + "/" + d.id + "/"
@@ -124,7 +122,7 @@ func (d *dataKeeperServer) DownloadFile(ctx context.Context, req *pb.DownloadReq
 	}, nil
 }
 func main() {
-	// Parse command line arguments
+
 	id := flag.String("name", "DataKeeper-1", "Unique identifier for this data keeper node")
 	portsStr := flag.String("ports", "50051", "Space-separated list of ports to listen on")
 	masterIP := flag.String("master_ip", "127.0.0.1", "IP address of the master tracker")
@@ -133,7 +131,6 @@ func main() {
 
 	flag.Parse()
 
-	// Split ports string into slice
 	ports := strings.Fields(*portsStr)
 	if len(ports) == 0 {
 		log.Fatal("At least one port must be specified")
@@ -160,14 +157,14 @@ func main() {
 		go startServer(keeper, port, &wg)
 	}
 
-	// Wait for all servers to finish (which shouldn't happen unless there's an error)
+	// Wait for all servers to finish starting
 	wg.Wait()
 }
 
 ///////////Helpers methods////////
 
-// notifyMasterOfUpload informs the master tracker that the file upload is complete.
-func notifyMasterOfUpload(masterIP, masterPort, fileName, dataKeeperID, filePath, uploadToken string) {
+// informs the master tracker that the file upload is complete.
+func notifyMasterOfUpload(masterIP, masterPort, fileName, dataKeeperID, filePath, uploadToken string, clientPort string) {
 	// Connect to the master tracker
 	masterAddr := fmt.Sprintf("%s:%s", masterIP, masterPort)
 	conn, err := grpc.Dial(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -183,10 +180,8 @@ func notifyMasterOfUpload(masterIP, masterPort, fileName, dataKeeperID, filePath
 		DataKeeperId: dataKeeperID,
 		FilePath:     filePath,
 		UploadToken:  uploadToken,
+		ClientPort:   clientPort,
 	}
-
-	// ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	// defer cancel()
 
 	resp, err := client.ConfirmUpload(context.Background(), confirmation)
 	if err != nil {
@@ -197,7 +192,7 @@ func notifyMasterOfUpload(masterIP, masterPort, fileName, dataKeeperID, filePath
 	fmt.Printf("DataKeeper %s: Master Tracker responded: %s\n", dataKeeperID, resp.Message)
 }
 
-// sendHeartbeats periodically sends heartbeat signals to the master tracker
+// periodically sends heartbeat signals to the master tracker every 1 sec
 func (d *dataKeeperServer) sendHeartbeats() {
 	masterAddr := fmt.Sprintf("%s:%s", d.masterIP, d.masterPort)
 
@@ -216,9 +211,7 @@ func (d *dataKeeperServer) sendHeartbeats() {
 			AvailablePorts: d.ports,
 		}
 
-		// ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		_, err = client.SendHeartbeat(context.Background(), heartbeatReq)
-		// cancel()
 
 		if err != nil {
 			log.Printf("DataKeeper %s: Failed to send heartbeat: %v", d.id, err)
@@ -231,7 +224,7 @@ func (d *dataKeeperServer) sendHeartbeats() {
 	}
 }
 
-// startServer starts a gRPC server on the given port
+// starts a gRPC server on the given port
 func startServer(keeper *dataKeeperServer, port string, wg *sync.WaitGroup) {
 	defer wg.Done()
 

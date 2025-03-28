@@ -15,7 +15,6 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 )
 
-// masterTrackerServer implements the DistributedFileSystem gRPC service for the master tracker.
 type masterTrackerServer struct {
 	pb.UnimplementedDistributedFileSystemServer
 	mu          sync.Mutex
@@ -24,42 +23,35 @@ type masterTrackerServer struct {
 	fileOwners  map[string]string          // Maps fileName -> clientId
 }
 
-// fileInfo represents an entry in the lookup table for a file
+// represents an entry in the lookup table for a file
 type fileInfo struct {
 	FileName    string
 	DataKeepers map[string]string // Map of dataKeeperID -> filePath on that data keeper
 }
 
-// dataKeeperInfo tracks information about a data keeper node
+// tracks information about a data keeper node
 type dataKeeperInfo struct {
 	ID             string
 	IP             string
-	Port           string   // Primary port (for backward compatibility)
-	AvailablePorts []string // All available ports
+	Port           string // Primary port
+	AvailablePorts []string
 	IsAlive        bool
-	LastSeen       int64 // Unix timestamp of last heartbeat
+	LastSeen       int64 //timestamp of last heartbeat
 }
 
 //////////////////////gRPC methods //////////////////////////
 
-// RequestUploadPermission is called by the client to get an available Data Keeper for upload.
+// called by the client to get an available Data Keeper for upload.
 func (m *masterTrackerServer) RequestUploadPermission(ctx context.Context, req *pb.UploadPermissionRequest) (*pb.UploadPermissionResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	// Check if there are any data keepers registered
 	if len(m.dataKeepers) == 0 {
-		// If no data keepers registered, use default
-		defaultMachine := &pb.MachineInfo{Ip: "127.0.0.1", Port: "50051"}
-		token := fmt.Sprintf("%s-%d", req.ClientId, time.Now().Unix())
 
-		fmt.Printf("MasterTracker: No data keepers available. Using default at %s:%s\n",
-			defaultMachine.Ip, defaultMachine.Port)
+		fmt.Printf("MasterTracker: No data keepers available. \n")
 
-		return &pb.UploadPermissionResponse{
-			UploadToken:        token,
-			AssignedDataKeeper: defaultMachine,
-		}, nil
+		return &pb.UploadPermissionResponse{}, fmt.Errorf("no data keepers available")
 	}
 
 	// Get a list of all alive data keepers
@@ -70,18 +62,9 @@ func (m *masterTrackerServer) RequestUploadPermission(ctx context.Context, req *
 		}
 	}
 
-	// If no alive data keepers found, use default
 	if len(aliveKeepers) == 0 {
-		defaultMachine := &pb.MachineInfo{Ip: "127.0.0.1", Port: "50051"}
-		token := fmt.Sprintf("%s-%d", req.ClientId, time.Now().Unix())
-
-		fmt.Printf("MasterTracker: No alive data keepers available. Using default at %s:%s\n",
-			defaultMachine.Ip, defaultMachine.Port)
-
-		return &pb.UploadPermissionResponse{
-			UploadToken:        token,
-			AssignedDataKeeper: defaultMachine,
-		}, nil
+		fmt.Printf("MasterTracker: No alive data keepers available.\n")
+		return &pb.UploadPermissionResponse{}, fmt.Errorf("no data keepers available")
 	}
 
 	// Select a random alive data keeper
@@ -89,16 +72,13 @@ func (m *masterTrackerServer) RequestUploadPermission(ctx context.Context, req *
 	selectedKeeper := aliveKeepers[rand.Intn(len(aliveKeepers))]
 
 	// Use port from keeper's available ports (using the first port for simplicity)
-	// In a more advanced implementation, you could track port usage and select the least loaded port
 	selectedPort := selectedKeeper.Port
 
-	// Create the response
 	assigned := &pb.MachineInfo{
 		Ip:   selectedKeeper.IP,
 		Port: selectedPort,
 	}
 
-	// Generate upload token (client ID + timestamp)
 	token := fmt.Sprintf("%s-%d", req.ClientId, time.Now().Unix())
 
 	fmt.Printf("MasterTracker: Received upload permission request from client %s. Assigned Data Keeper: %s (ID: %s) on port %s\n",
@@ -110,7 +90,7 @@ func (m *masterTrackerServer) RequestUploadPermission(ctx context.Context, req *
 	}, nil
 }
 
-// ConfirmUpload is called by the Data Keeper to confirm that the file was successfully stored.
+// called by the Data Keeper to confirm that the file was successfully stored.
 func (m *masterTrackerServer) ConfirmUpload(ctx context.Context, confirmation *pb.UploadConfirmation) (*pb.Ack, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -130,7 +110,7 @@ func (m *masterTrackerServer) ConfirmUpload(ctx context.Context, confirmation *p
 	fileRecord.DataKeepers[confirmation.DataKeeperId] = confirmation.FilePath
 	// After file ownership is assigned, notify the client of successful upload
 	if !exists {
-		clientConn, err := grpc.Dial("localhost:50057", grpc.WithTransportCredentials(insecure.NewCredentials()))
+		clientConn, err := grpc.Dial("localhost:"+confirmation.ClientPort, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
 			log.Printf("MasterTracker: failed to connect to client for notification: %v", err)
 			return &pb.Ack{Success: false, Message: "failed to connect to client for notification"}, err
@@ -142,9 +122,6 @@ func (m *masterTrackerServer) ConfirmUpload(ctx context.Context, confirmation *p
 		notification := &pb.ClientNotification{
 			Message: fmt.Sprintf("File '%s' has been successfully uploaded and registered", confirmation.FileName),
 		}
-
-		// ctx, cancel := context.WithTimeout(context.Background(), time.Second*5)
-		// defer cancel()
 
 		_, err = clientService.NotifyClientUploadCompletion(ctx, notification)
 		if err != nil {
@@ -162,12 +139,11 @@ func (m *masterTrackerServer) ConfirmUpload(ctx context.Context, confirmation *p
 	return &pb.Ack{Success: true, Message: "Upload confirmed by Master Tracker."}, nil
 }
 
-// SendHeartbeat handles heartbeat messages from data keepers
+// handles heartbeat messages from data keepers
 func (m *masterTrackerServer) SendHeartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.Ack, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Get the data keeper ID
 	dataKeeperID := req.DataKeeperId
 
 	// Check if this data keeper is already known
@@ -215,7 +191,7 @@ func (m *masterTrackerServer) SendHeartbeat(ctx context.Context, req *pb.Heartbe
 	return &pb.Ack{Success: true, Message: "Heartbeat acknowledged"}, nil
 }
 
-// RequestDownloadInfo provides information about available data keepers that have the requested file
+// provides information about available data keepers that have the requested file
 func (m *masterTrackerServer) RequestDownloadInfo(ctx context.Context, req *pb.DownloadInfoRequest) (*pb.DownloadInfoResponse, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -269,7 +245,6 @@ func (m *masterTrackerServer) RequestDownloadInfo(ctx context.Context, req *pb.D
 }
 
 func main() {
-	// Listen on port 50050 for Master Tracker.
 	lis, err := net.Listen("tcp", ":50050")
 	if err != nil {
 		log.Fatalf("MasterTracker: failed to listen: %v", err)
@@ -297,7 +272,7 @@ func main() {
 
 // //////// Helpers  //////////
 
-// checkAndInitiateReplication periodically checks and initiates replication for files with less than 3 copies
+// periodically checks and initiates replication for files with less than 3 copies
 func (m *masterTrackerServer) checkAndInitiateReplication() {
 	replicationInterval := 10 * time.Second // Check for replication every 10 seconds
 
@@ -379,7 +354,7 @@ func (m *masterTrackerServer) checkAndInitiateReplication() {
 	}
 }
 
-// selectMachineToCopyTo returns a valid data keeper to copy a file to
+// returns a valid data keeper to copy a file to
 func (m *masterTrackerServer) selectMachineToCopyTo(fileName string) *dataKeeperInfo {
 	fileInfo, exists := m.lookupTable[fileName]
 	if !exists {
@@ -406,12 +381,12 @@ func (m *masterTrackerServer) selectMachineToCopyTo(fileName string) *dataKeeper
 	return candidates[rand.Intn(len(candidates))]
 }
 
-// notifyMachineDataTransfer notifies source and destination machines to transfer a file
+// notifies source and destination machines to transfer a file
 func (m *masterTrackerServer) notifyMachineDataTransfer(source, destination *dataKeeperInfo, fileName, sourceFilePath string) bool {
 	// Create replication request
 	replicationReq := &pb.ReplicationRequest{
 		FileName:              fileName,
-		SourceDataKeeper:      source.ID, // Using ID instead of port for better identification
+		SourceDataKeeper:      source.ID,
 		DestinationDataKeeper: destination.Port,
 	}
 
@@ -427,15 +402,12 @@ func (m *masterTrackerServer) notifyMachineDataTransfer(source, destination *dat
 	}
 	defer conn.Close()
 
-	// Create client and send the replication request
 	client := pb.NewDistributedFileSystemClient(conn)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
 
 	fmt.Printf("    ├── Requesting replication of '%s' to port %s...\n",
 		fileName, destination.Port)
 
-	resp, err := client.InitiateReplication(ctx, replicationReq)
+	resp, err := client.InitiateReplication(context.Background(), replicationReq)
 	if err != nil {
 		fmt.Printf("    └── RPC ERROR: Replication request failed: %v\n", err)
 		return false
@@ -452,7 +424,7 @@ func (m *masterTrackerServer) notifyMachineDataTransfer(source, destination *dat
 	return true
 }
 
-// checkDataKeeperStatus periodically checks if data keepers are still alive
+// periodically checks if data keepers are still alive
 func (m *masterTrackerServer) checkDataKeeperStatus() {
 	heartbeatTimeout := int64(3) // Consider a data keeper dead after 3 seconds without heartbeat
 

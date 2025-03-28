@@ -50,6 +50,7 @@ message UploadFileRequest {
     string file_name = 1;
     bytes file_data = 2;
     string upload_token = 3;
+    string client_port = 4;
 }
 
 message UploadFileResponse {
@@ -61,6 +62,7 @@ message UploadConfirmation {
     string data_keeper_id = 2;
     string file_path = 3;
     string upload_token = 4;   // Added to track file ownership
+    string client_port=5;
 }
 
 message ClientNotification {
