@@ -385,9 +385,10 @@ func (m *masterTrackerServer) selectMachineToCopyTo(fileName string) *dataKeeper
 func (m *masterTrackerServer) notifyMachineDataTransfer(source, destination *dataKeeperInfo, fileName, sourceFilePath string) bool {
 	// Create replication request
 	replicationReq := &pb.ReplicationRequest{
-		FileName:              fileName,
-		SourceDataKeeper:      source.ID,
-		DestinationDataKeeper: destination.Port,
+		FileName:                fileName,
+		SourceDataKeeper:        source.ID,
+		DestinationDataKeeper:   destination.Port,
+		DestinationDataKeeperIp: destination.IP,
 	}
 
 	// Connect to the source data keeper to initiate replication

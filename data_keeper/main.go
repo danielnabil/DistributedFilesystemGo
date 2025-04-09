@@ -61,6 +61,7 @@ func (d *dataKeeperServer) InitiateReplication(ctx context.Context, req *pb.Repl
 
 	dest_port := req.DestinationDataKeeper
 	file_name := req.FileName
+	dest_ip := req.DestinationDataKeeperIp
 	filePath := fmt.Sprintf("%s/%s/%s", d.storagePath, d.id, file_name)
 
 	// upload file to the destination port
@@ -74,8 +75,8 @@ func (d *dataKeeperServer) InitiateReplication(ctx context.Context, req *pb.Repl
 	fmt.Printf("  ├── Successfully read %d bytes\n", len(file))
 
 	// connect to the destination port
-	fmt.Printf("  ├── Connecting to destination at localhost:%s\n", dest_port)
-	conn, err := grpc.Dial("localhost:"+dest_port, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	fmt.Printf("  ├── Connecting to destination at ip: %s and port:  %s\n", dest_ip, dest_port)
+	conn, err := grpc.Dial(dest_ip+":"+dest_port, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		errMsg := fmt.Sprintf("  └── ERROR: Failed to connect to destination: %v", err)
 		log.Println(errMsg)
