@@ -19,7 +19,8 @@ import (
 )
 
 const (
-	defaultClientPort = "50057"
+	defaultClientPort        = "50057"
+	defaultMasterIP   string = "192.168.38.222"
 )
 
 type clientServer struct {
@@ -44,6 +45,7 @@ var uploadedFiles = make(map[string]string) // Maps fileName -> clientId
 
 func main() {
 	clientPort := flag.String("port", defaultClientPort, "Port number to listen for notifications")
+	masterIP := flag.String("master_ip", defaultMasterIP, "IP for master IP")
 	flag.Parse()
 
 	var username string
@@ -66,7 +68,7 @@ func main() {
 	go startClientServer(notificationChan, *clientPort)
 
 	// Connect to Master Tracker
-	masterConn, err := grpc.Dial("localhost:50050", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	masterConn, err := grpc.Dial(*masterIP+":50050", grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		log.Fatalf("Client: failed to connect to Master Tracker: %v", err)
 	}

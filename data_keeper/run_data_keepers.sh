@@ -41,3 +41,5 @@ echo "Press Ctrl+C to terminate all data keeper nodes"
 
 # Keep the script running until user presses Ctrl+C
 wait
+# to run client 
+#go run client/main.go -port 50059 -master_ip 192.168.38.222
