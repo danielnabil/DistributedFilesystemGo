@@ -151,7 +151,7 @@ func (m *masterTrackerServer) SendHeartbeat(ctx context.Context, req *pb.Heartbe
 	if !exists {
 		// If this is a new data keeper, create an entry for it
 		// Extract IP from peer info
-		ip := "127.0.0.1"
+		ip := req.DataKeeperIp
 		port := "50051"
 
 		// If there are available ports, use the first one as primary and store all

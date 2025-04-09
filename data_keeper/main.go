@@ -24,6 +24,7 @@ type dataKeeperServer struct {
 	masterPort  string
 	ports       []string
 	storagePath string
+	ip          string
 }
 
 ///////////gRPC methods////////
@@ -135,6 +136,13 @@ func main() {
 	if len(ports) == 0 {
 		log.Fatal("At least one port must be specified")
 	}
+	ip, err := getLocalIP()
+	if err != nil {
+		log.Fatalf("Failed to get local IP address: %v", err)
+	}
+	if ip == "" {
+		log.Fatal("No valid IP address found")
+	}
 
 	// Create data keeper server
 	keeper := &dataKeeperServer{
@@ -143,6 +151,7 @@ func main() {
 		masterPort:  *masterPort,
 		ports:       ports,
 		storagePath: *storagePath,
+		ip:          ip,
 	}
 
 	// Start heartbeat goroutine
@@ -209,6 +218,7 @@ func (d *dataKeeperServer) sendHeartbeats() {
 		heartbeatReq := &pb.HeartbeatRequest{
 			DataKeeperId:   d.id,
 			AvailablePorts: d.ports,
+			DataKeeperIp:   d.ip,
 		}
 
 		_, err = client.SendHeartbeat(context.Background(), heartbeatReq)
@@ -240,4 +250,19 @@ func startServer(keeper *dataKeeperServer, port string, wg *sync.WaitGroup) {
 	if err := grpcServer.Serve(lis); err != nil {
 		log.Fatalf("DataKeeper %s: failed to serve on port %s: %v", keeper.id, port, err)
 	}
+}
+
+func getLocalIP() (string, error) {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return "", err
+	}
+
+	for _, addr := range addrs {
+		if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil && !ipnet.IP.IsLoopback() {
+			return ipnet.IP.String(), nil
+		}
+	}
+
+	return "", fmt.Errorf("no valid IP address found")
 }

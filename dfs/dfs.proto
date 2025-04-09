@@ -93,6 +93,7 @@ message DownloadResponse {
 message HeartbeatRequest {
     string data_keeper_id = 1;
     repeated string available_ports = 2;
+    string data_keeper_ip =3;
 }
 
 message ReplicationRequest {
