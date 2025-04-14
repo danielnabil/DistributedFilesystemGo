@@ -254,15 +254,45 @@ func startServer(keeper *dataKeeperServer, port string, wg *sync.WaitGroup) {
 }
 
 func getLocalIP() (string, error) {
-	addrs, err := net.InterfaceAddrs()
+	interfaces, err := net.Interfaces()
 	if err != nil {
 		return "", err
 	}
 
-	for _, addr := range addrs {
-		if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil && !ipnet.IP.IsLoopback() {
-			return ipnet.IP.String(), nil
+	var fallbackIP string
+
+	for _, iface := range interfaces {
+		// Skip down or loopback interfaces
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
 		}
+
+		// Get interface addresses
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			// Only interested in IPv4
+			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
+				ip := ipnet.IP.String()
+
+				// Prefer wireless interfaces (like wlo1, wlan0)
+				if strings.HasPrefix(iface.Name, "wl") {
+					return ip, nil
+				}
+
+				// Fallback to first non-loopback IP
+				if fallbackIP == "" {
+					fallbackIP = ip
+				}
+			}
+		}
+	}
+
+	if fallbackIP != "" {
+		return fallbackIP, nil
 	}
 
 	return "", fmt.Errorf("no valid IP address found")
