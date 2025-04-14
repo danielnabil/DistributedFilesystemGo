@@ -173,12 +173,20 @@ func uploadFile(masterClient pb.DistributedFileSystemClient, notificationChan ch
 	}
 	defer dataKeeperConn.Close()
 
+	// Get client's IP address
+	clientIP, err := getLocalIP()
+	if err != nil {
+		log.Printf("Client: failed to get local IP: %v", err)
+		clientIP = "127.0.0.1" // Fallback
+	}
+
 	dataKeeperClient := pb.NewDistributedFileSystemClient(dataKeeperConn)
 	uploadReq := &pb.UploadFileRequest{
 		FileName:    fileName,
 		FileData:    fileData,
 		UploadToken: uploadPermResp.UploadToken,
 		ClientPort:  clientPort,
+		ClientIp:    clientIP, // Add the client IP
 	}
 
 	fmt.Printf("Client: Uploading file '%s' (%d bytes)...\n", fileName, len(fileData))
@@ -257,7 +265,7 @@ func downloadFile(masterClient pb.DistributedFileSystemClient, clientId string) 
 	dataKeeperAddr := fmt.Sprintf("%s:%s", keeper.Ip, keeper.Port)
 	dataKeeperConn, err := grpc.Dial(dataKeeperAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
-		log.Printf("Client: failed to connect to Data Keeper at %s: %v", dataKeeperAddr, err)
+		log.Printf("Client: failed to connect to Data Keeper at %s: %v", err)
 		return
 	}
 	defer dataKeeperConn.Close()
@@ -344,4 +352,50 @@ func loadUploadedFilesList(clientId string) {
 			uploadedFiles[fileName] = token
 		}
 	}
+}
+
+// Get the client's IP address for remote connections
+func getLocalIP() (string, error) {
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		return "", err
+	}
+
+	var fallbackIP string
+
+	for _, iface := range interfaces {
+		// Skip down or loopback interfaces
+		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+
+		// Get interface addresses
+		addrs, err := iface.Addrs()
+		if err != nil {
+			continue
+		}
+
+		for _, addr := range addrs {
+			// Only interested in IPv4
+			if ipnet, ok := addr.(*net.IPNet); ok && ipnet.IP.To4() != nil {
+				ip := ipnet.IP.String()
+
+				// Prefer wireless interfaces (like wlo1, wlan0)
+				if strings.HasPrefix(iface.Name, "wl") {
+					return ip, nil
+				}
+
+				// Fallback to first non-loopback IP
+				if fallbackIP == "" {
+					fallbackIP = ip
+				}
+			}
+		}
+	}
+
+	if fallbackIP != "" {
+		return fallbackIP, nil
+	}
+
+	return "", fmt.Errorf("no valid IP address found")
 }

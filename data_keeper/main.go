@@ -47,7 +47,7 @@ func (d *dataKeeperServer) UploadFile(ctx context.Context, req *pb.UploadFileReq
 		return nil, fmt.Errorf("file write error: %v", err)
 	}
 
-	go notifyMasterOfUpload(d.masterIP, d.masterPort, req.FileName, d.id, filePath, req.UploadToken, req.ClientPort)
+	go notifyMasterOfUpload(d.masterIP, d.masterPort, req.FileName, d.id, filePath, req.UploadToken, req.ClientPort, req.ClientIp)
 
 	return &pb.UploadFileResponse{Message: "File successfully received and stored."}, nil
 }
@@ -174,7 +174,7 @@ func main() {
 ///////////Helpers methods////////
 
 // informs the master tracker that the file upload is complete.
-func notifyMasterOfUpload(masterIP, masterPort, fileName, dataKeeperID, filePath, uploadToken string, clientPort string) {
+func notifyMasterOfUpload(masterIP, masterPort, fileName, dataKeeperID, filePath, uploadToken, clientPort, clientIP string) {
 	// Connect to the master tracker
 	masterAddr := fmt.Sprintf("%s:%s", masterIP, masterPort)
 	conn, err := grpc.Dial(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -191,6 +191,7 @@ func notifyMasterOfUpload(masterIP, masterPort, fileName, dataKeeperID, filePath
 		FilePath:     filePath,
 		UploadToken:  uploadToken,
 		ClientPort:   clientPort,
+		ClientIp:     clientIP,
 	}
 
 	resp, err := client.ConfirmUpload(context.Background(), confirmation)

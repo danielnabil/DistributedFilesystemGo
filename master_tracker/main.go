@@ -110,9 +110,11 @@ func (m *masterTrackerServer) ConfirmUpload(ctx context.Context, confirmation *p
 	fileRecord.DataKeepers[confirmation.DataKeeperId] = confirmation.FilePath
 	// After file ownership is assigned, notify the client of successful upload
 	if !exists {
-		clientConn, err := grpc.Dial("localhost:"+confirmation.ClientPort, grpc.WithTransportCredentials(insecure.NewCredentials()))
+		// Use client_ip instead of hardcoded "localhost"
+		clientAddr := fmt.Sprintf("%s:%s", confirmation.ClientIp, confirmation.ClientPort)
+		clientConn, err := grpc.Dial(clientAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 		if err != nil {
-			log.Printf("MasterTracker: failed to connect to client for notification: %v", err)
+			log.Printf("MasterTracker: failed to connect to client at %s for notification: %v", clientAddr, err)
 			return &pb.Ack{Success: false, Message: "failed to connect to client for notification"}, err
 		}
 		defer clientConn.Close()
