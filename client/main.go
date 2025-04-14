@@ -181,21 +181,58 @@ func uploadFile(masterClient pb.DistributedFileSystemClient, notificationChan ch
 	}
 
 	dataKeeperClient := pb.NewDistributedFileSystemClient(dataKeeperConn)
-	uploadReq := &pb.UploadFileRequest{
-		FileName:    fileName,
-		FileData:    fileData,
-		UploadToken: uploadPermResp.UploadToken,
-		ClientPort:  clientPort,
-		ClientIp:    clientIP, // Add the client IP
-	}
 
-	fmt.Printf("Client: Uploading file '%s' (%d bytes)...\n", fileName, len(fileData))
-	_, err = dataKeeperClient.UploadFile(context.Background(), uploadReq)
+	// Streaming implementation for file upload
+	stream, err := dataKeeperClient.UploadFile(context.Background())
 	if err != nil {
-		log.Printf("Client: error uploading file: %v", err)
+		log.Printf("Client: error creating upload stream: %v", err)
 		fmt.Println("Upload failed. Please try again.")
 		return
 	}
+
+	// Define chunk size (e.g., 1MB chunks)
+	const chunkSize = 1 * 1024 * 1024 // 1MB
+
+	// Send file in chunks
+	fileSize := len(fileData)
+	fmt.Printf("Client: Uploading file '%s' in chunks (%d bytes total)...\n", fileName, fileSize)
+
+	// Send the first chunk with all metadata
+	firstChunk := min(chunkSize, fileSize)
+	err = stream.Send(&pb.UploadFileRequest{
+		FileName:    fileName,
+		FileData:    fileData[:firstChunk],
+		UploadToken: uploadPermResp.UploadToken,
+		ClientPort:  clientPort,
+		ClientIp:    clientIP,
+	})
+	if err != nil {
+		log.Printf("Client: error sending first chunk: %v", err)
+		return
+	}
+
+	// Send remaining chunks if file is larger than chunk size
+	for i := firstChunk; i < fileSize; i += chunkSize {
+		end := min(i+chunkSize, fileSize)
+		err = stream.Send(&pb.UploadFileRequest{
+			FileData: fileData[i:end],
+		})
+		if err != nil {
+			log.Printf("Client: error sending chunk: %v", err)
+			return
+		}
+		fmt.Printf("\rProgress: %.1f%%", float64(end)/float64(fileSize)*100)
+	}
+
+	// Close the stream and get response
+	resp, err := stream.CloseAndRecv()
+	if err != nil {
+		log.Printf("Client: error completing upload: %v", err)
+		fmt.Println("\nUpload failed. Please try again.")
+		return
+	}
+
+	fmt.Printf("\nClient: Upload response: %s\n", resp.Message)
 
 	fmt.Println("Waiting for upload confirmation...")
 
@@ -398,4 +435,12 @@ func getLocalIP() (string, error) {
 	}
 
 	return "", fmt.Errorf("no valid IP address found")
+}
+
+// Helper function to calculate the minimum of two integers
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

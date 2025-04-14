@@ -4,6 +4,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
@@ -30,26 +31,78 @@ type dataKeeperServer struct {
 ///////////gRPC methods////////
 
 // receive the file data from the client.
-func (d *dataKeeperServer) UploadFile(ctx context.Context, req *pb.UploadFileRequest) (*pb.UploadFileResponse, error) {
-	fmt.Printf("DataKeeper %s: Received file upload request for '%s' (size: %d bytes).\n",
-		d.id, req.FileName, len(req.FileData))
+func (d *dataKeeperServer) UploadFile(stream pb.DistributedFileSystem_UploadFileServer) error {
+	var fileName string
+	var uploadToken string
+	var clientPort string
+	var clientIp string
+	var totalBytes int
+
 	storagePath := d.storagePath + "/" + d.id + "/"
 
 	if err := os.MkdirAll(storagePath, 0755); err != nil {
 		log.Printf("DataKeeper %s: Error creating storage directory: %v", d.id, err)
-		return nil, fmt.Errorf("storage error: %v", err)
+		return fmt.Errorf("storage error: %v", err)
 	}
 
-	// Save the file to disk
-	filePath := fmt.Sprintf("%s/%s", storagePath, req.FileName)
-	if err := os.WriteFile(filePath, req.FileData, 0644); err != nil {
-		log.Printf("DataKeeper %s: Error writing file: %v", d.id, err)
-		return nil, fmt.Errorf("file write error: %v", err)
+	// Create file path and file handle
+	var filePath string
+	var file *os.File
+
+	// Process streaming chunks
+	for {
+		// Receive the next chunk
+		req, err := stream.Recv()
+		if err == io.EOF {
+			// End of file transmission
+			break
+		}
+		if err != nil {
+			log.Printf("DataKeeper %s: Error receiving chunk: %v", d.id, err)
+			return fmt.Errorf("receive error: %v", err)
+		}
+
+		// Extract metadata from first chunk
+		if fileName == "" {
+			fileName = req.FileName
+			uploadToken = req.UploadToken
+			clientPort = req.ClientPort
+			clientIp = req.ClientIp
+
+			filePath = fmt.Sprintf("%s/%s", storagePath, fileName)
+
+			// Create or truncate the file
+			var err error
+			file, err = os.Create(filePath)
+			if err != nil {
+				log.Printf("DataKeeper %s: Error creating file: %v", d.id, err)
+				return fmt.Errorf("file creation error: %v", err)
+			}
+			defer file.Close()
+
+			fmt.Printf("DataKeeper %s: Started receiving file upload for '%s'\n", d.id, fileName)
+		}
+
+		// Write chunk to file
+		n, err := file.Write(req.FileData)
+		if err != nil {
+			log.Printf("DataKeeper %s: Error writing chunk to file: %v", d.id, err)
+			return fmt.Errorf("file write error: %v", err)
+		}
+
+		totalBytes += n
 	}
 
-	go notifyMasterOfUpload(d.masterIP, d.masterPort, req.FileName, d.id, filePath, req.UploadToken, req.ClientPort, req.ClientIp)
+	fmt.Printf("DataKeeper %s: Completed file upload for '%s' (total size: %d bytes)\n",
+		d.id, fileName, totalBytes)
 
-	return &pb.UploadFileResponse{Message: "File successfully received and stored."}, nil
+	// Notify master of the upload
+	go notifyMasterOfUpload(d.masterIP, d.masterPort, fileName, d.id, filePath, uploadToken, clientPort, clientIp)
+
+	// Send response when complete
+	return stream.SendAndClose(&pb.UploadFileResponse{
+		Message: fmt.Sprintf("File successfully received and stored (%d bytes)", totalBytes),
+	})
 }
 
 // handles replication requests from the master tracker
@@ -88,9 +141,27 @@ func (d *dataKeeperServer) InitiateReplication(ctx context.Context, req *pb.Repl
 	fmt.Printf("  ├── Uploading file to destination...\n")
 
 	// Call the UploadFile RPC
-	uploadResp, err := sourceClient.UploadFile(context.Background(), &pb.UploadFileRequest{FileName: file_name, FileData: file})
+	stream, err := sourceClient.UploadFile(context.Background())
 	if err != nil {
-		errMsg := fmt.Sprintf("  └── ERROR: Failed to upload file to destination: %v", err)
+		errMsg := fmt.Sprintf("  └── ERROR: Failed to create upload stream: %v", err)
+		log.Println(errMsg)
+		return &pb.Ack{Success: false, Message: errMsg}, err
+	}
+
+	// Send the file data
+	err = stream.Send(&pb.UploadFileRequest{
+		FileName: file_name,
+		FileData: file,
+	})
+	if err != nil {
+		errMsg := fmt.Sprintf("  └── ERROR: Failed to send file data: %v", err)
+		log.Println(errMsg)
+		return &pb.Ack{Success: false, Message: errMsg}, err
+	}
+
+	uploadResp, err := stream.CloseAndRecv()
+	if err != nil {
+		errMsg := fmt.Sprintf("  └── ERROR: Failed to complete file upload: %v", err)
 		log.Println(errMsg)
 		return &pb.Ack{Success: false, Message: errMsg}, err
 	}

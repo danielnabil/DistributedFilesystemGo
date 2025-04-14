@@ -38,7 +38,7 @@ type DistributedFileSystemClient interface {
 	// Client requests permission to upload a file (gets an available Data Keeper)
 	RequestUploadPermission(ctx context.Context, in *UploadPermissionRequest, opts ...grpc.CallOption) (*UploadPermissionResponse, error)
 	// Client uploads file to the assigned Data Keeper
-	UploadFile(ctx context.Context, in *UploadFileRequest, opts ...grpc.CallOption) (*UploadFileResponse, error)
+	UploadFile(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[UploadFileRequest, UploadFileResponse], error)
 	// Data Keeper notifies Master Tracker about a successful upload
 	ConfirmUpload(ctx context.Context, in *UploadConfirmation, opts ...grpc.CallOption) (*Ack, error)
 	// Master Tracker notifies Client that upload is successfully registered
@@ -71,15 +71,18 @@ func (c *distributedFileSystemClient) RequestUploadPermission(ctx context.Contex
 	return out, nil
 }
 
-func (c *distributedFileSystemClient) UploadFile(ctx context.Context, in *UploadFileRequest, opts ...grpc.CallOption) (*UploadFileResponse, error) {
+func (c *distributedFileSystemClient) UploadFile(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[UploadFileRequest, UploadFileResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(UploadFileResponse)
-	err := c.cc.Invoke(ctx, DistributedFileSystem_UploadFile_FullMethodName, in, out, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &DistributedFileSystem_ServiceDesc.Streams[0], DistributedFileSystem_UploadFile_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	x := &grpc.GenericClientStream[UploadFileRequest, UploadFileResponse]{ClientStream: stream}
+	return x, nil
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type DistributedFileSystem_UploadFileClient = grpc.ClientStreamingClient[UploadFileRequest, UploadFileResponse]
 
 func (c *distributedFileSystemClient) ConfirmUpload(ctx context.Context, in *UploadConfirmation, opts ...grpc.CallOption) (*Ack, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -150,7 +153,7 @@ type DistributedFileSystemServer interface {
 	// Client requests permission to upload a file (gets an available Data Keeper)
 	RequestUploadPermission(context.Context, *UploadPermissionRequest) (*UploadPermissionResponse, error)
 	// Client uploads file to the assigned Data Keeper
-	UploadFile(context.Context, *UploadFileRequest) (*UploadFileResponse, error)
+	UploadFile(grpc.ClientStreamingServer[UploadFileRequest, UploadFileResponse]) error
 	// Data Keeper notifies Master Tracker about a successful upload
 	ConfirmUpload(context.Context, *UploadConfirmation) (*Ack, error)
 	// Master Tracker notifies Client that upload is successfully registered
@@ -176,8 +179,8 @@ type UnimplementedDistributedFileSystemServer struct{}
 func (UnimplementedDistributedFileSystemServer) RequestUploadPermission(context.Context, *UploadPermissionRequest) (*UploadPermissionResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method RequestUploadPermission not implemented")
 }
-func (UnimplementedDistributedFileSystemServer) UploadFile(context.Context, *UploadFileRequest) (*UploadFileResponse, error) {
-	return nil, status.Errorf(codes.Unimplemented, "method UploadFile not implemented")
+func (UnimplementedDistributedFileSystemServer) UploadFile(grpc.ClientStreamingServer[UploadFileRequest, UploadFileResponse]) error {
+	return status.Errorf(codes.Unimplemented, "method UploadFile not implemented")
 }
 func (UnimplementedDistributedFileSystemServer) ConfirmUpload(context.Context, *UploadConfirmation) (*Ack, error) {
 	return nil, status.Errorf(codes.Unimplemented, "method ConfirmUpload not implemented")
@@ -236,23 +239,12 @@ func _DistributedFileSystem_RequestUploadPermission_Handler(srv interface{}, ctx
 	return interceptor(ctx, in, info, handler)
 }
 
-func _DistributedFileSystem_UploadFile_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(UploadFileRequest)
-	if err := dec(in); err != nil {
-		return nil, err
-	}
-	if interceptor == nil {
-		return srv.(DistributedFileSystemServer).UploadFile(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: DistributedFileSystem_UploadFile_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(DistributedFileSystemServer).UploadFile(ctx, req.(*UploadFileRequest))
-	}
-	return interceptor(ctx, in, info, handler)
+func _DistributedFileSystem_UploadFile_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(DistributedFileSystemServer).UploadFile(&grpc.GenericServerStream[UploadFileRequest, UploadFileResponse]{ServerStream: stream})
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type DistributedFileSystem_UploadFileServer = grpc.ClientStreamingServer[UploadFileRequest, UploadFileResponse]
 
 func _DistributedFileSystem_ConfirmUpload_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(UploadConfirmation)
@@ -374,10 +366,6 @@ var DistributedFileSystem_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _DistributedFileSystem_RequestUploadPermission_Handler,
 		},
 		{
-			MethodName: "UploadFile",
-			Handler:    _DistributedFileSystem_UploadFile_Handler,
-		},
-		{
 			MethodName: "ConfirmUpload",
 			Handler:    _DistributedFileSystem_ConfirmUpload_Handler,
 		},
@@ -402,6 +390,12 @@ var DistributedFileSystem_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _DistributedFileSystem_InitiateReplication_Handler,
 		},
 	},
-	Streams:  []grpc.StreamDesc{},
+	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "UploadFile",
+			Handler:       _DistributedFileSystem_UploadFile_Handler,
+			ClientStreams: true,
+		},
+	},
 	Metadata: "dfs/dfs.proto",
 }

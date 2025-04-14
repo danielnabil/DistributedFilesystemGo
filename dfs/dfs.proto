@@ -10,7 +10,7 @@ service DistributedFileSystem {
     rpc RequestUploadPermission(UploadPermissionRequest) returns (UploadPermissionResponse);
     
     // Client uploads file to the assigned Data Keeper
-    rpc UploadFile(UploadFileRequest) returns (UploadFileResponse);
+    rpc UploadFile(stream UploadFileRequest) returns (UploadFileResponse);
     
     // Data Keeper notifies Master Tracker about a successful upload
     rpc ConfirmUpload(UploadConfirmation) returns (Ack);
