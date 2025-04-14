@@ -2,3 +2,4 @@ Distributed File System.pdf
 *_uploaded_files
 .data_keeper_pids
 data_keeper/DataKeeper*
+client/data/*

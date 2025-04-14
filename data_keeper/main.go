@@ -117,17 +117,17 @@ func (d *dataKeeperServer) InitiateReplication(ctx context.Context, req *pb.Repl
 	dest_ip := req.DestinationDataKeeperIp
 	filePath := fmt.Sprintf("%s/%s/%s", d.storagePath, d.id, file_name)
 
-	// upload file to the destination port
-	fmt.Printf("  ├── Reading file from: %s\n", filePath)
-	file, err := os.ReadFile(filePath)
+	// Check if file exists
+	fileInfo, err := os.Stat(filePath)
 	if err != nil {
-		errMsg := fmt.Sprintf("  └── ERROR: Failed to read file: %v", err)
+		errMsg := fmt.Sprintf("  └── ERROR: Failed to access file: %v", err)
 		log.Println(errMsg)
 		return &pb.Ack{Success: false, Message: errMsg}, err
 	}
-	fmt.Printf("  ├── Successfully read %d bytes\n", len(file))
+	fileSize := fileInfo.Size()
+	fmt.Printf("  ├── File size: %d bytes\n", fileSize)
 
-	// connect to the destination port
+	// Connect to the destination
 	fmt.Printf("  ├── Connecting to destination at ip: %s and port:  %s\n", dest_ip, dest_port)
 	conn, err := grpc.Dial(dest_ip+":"+dest_port, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -140,7 +140,16 @@ func (d *dataKeeperServer) InitiateReplication(ctx context.Context, req *pb.Repl
 	sourceClient := pb.NewDistributedFileSystemClient(conn)
 	fmt.Printf("  ├── Uploading file to destination...\n")
 
-	// Call the UploadFile RPC
+	// Open file for streaming
+	file, err := os.Open(filePath)
+	if err != nil {
+		errMsg := fmt.Sprintf("  └── ERROR: Failed to open file for reading: %v", err)
+		log.Println(errMsg)
+		return &pb.Ack{Success: false, Message: errMsg}, err
+	}
+	defer file.Close()
+
+	// Create upload stream
 	stream, err := sourceClient.UploadFile(context.Background())
 	if err != nil {
 		errMsg := fmt.Sprintf("  └── ERROR: Failed to create upload stream: %v", err)
@@ -148,17 +157,59 @@ func (d *dataKeeperServer) InitiateReplication(ctx context.Context, req *pb.Repl
 		return &pb.Ack{Success: false, Message: errMsg}, err
 	}
 
-	// Send the file data
-	err = stream.Send(&pb.UploadFileRequest{
-		FileName: file_name,
-		FileData: file,
-	})
-	if err != nil {
-		errMsg := fmt.Sprintf("  └── ERROR: Failed to send file data: %v", err)
+	// Define chunk size (1MB chunks)
+	const chunkSize = 1 * 1024 * 1024
+	buffer := make([]byte, chunkSize)
+	var totalSent int64
+
+	// Send first chunk with metadata
+	bytesRead, err := file.Read(buffer)
+	if err != nil && err != io.EOF {
+		errMsg := fmt.Sprintf("  └── ERROR: Failed to read first chunk: %v", err)
 		log.Println(errMsg)
 		return &pb.Ack{Success: false, Message: errMsg}, err
 	}
 
+	// Send first chunk with metadata
+	err = stream.Send(&pb.UploadFileRequest{
+		FileName: file_name,
+		FileData: buffer[:bytesRead],
+	})
+	if err != nil {
+		errMsg := fmt.Sprintf("  └── ERROR: Failed to send first chunk: %v", err)
+		log.Println(errMsg)
+		return &pb.Ack{Success: false, Message: errMsg}, err
+	}
+	totalSent += int64(bytesRead)
+
+	// Send remaining chunks
+	for {
+		bytesRead, err := file.Read(buffer)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			errMsg := fmt.Sprintf("  └── ERROR: Failed to read file chunk: %v", err)
+			log.Println(errMsg)
+			return &pb.Ack{Success: false, Message: errMsg}, err
+		}
+
+		err = stream.Send(&pb.UploadFileRequest{
+			FileData: buffer[:bytesRead],
+		})
+		if err != nil {
+			errMsg := fmt.Sprintf("  └── ERROR: Failed to send chunk: %v", err)
+			log.Println(errMsg)
+			return &pb.Ack{Success: false, Message: errMsg}, err
+		}
+		totalSent += int64(bytesRead)
+
+		// Print progress
+		fmt.Printf("\r  ├── Progress: %.1f%%", float64(totalSent)/float64(fileSize)*100)
+	}
+	fmt.Println()
+
+	// Close the stream and get response
 	uploadResp, err := stream.CloseAndRecv()
 	if err != nil {
 		errMsg := fmt.Sprintf("  └── ERROR: Failed to complete file upload: %v", err)
