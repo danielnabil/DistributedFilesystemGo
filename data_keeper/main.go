@@ -129,7 +129,7 @@ func (d *dataKeeperServer) InitiateReplication(ctx context.Context, req *pb.Repl
 
 	// Connect to the destination
 	fmt.Printf("  ├── Connecting to destination at ip: %s and port:  %s\n", dest_ip, dest_port)
-	conn, err := grpc.Dial(dest_ip+":"+dest_port, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.Dial(dest_ip+":"+dest_port, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(1024*1024*1024), grpc.MaxCallRecvMsgSize(1024*1024*1024)))
 	if err != nil {
 		errMsg := fmt.Sprintf("  └── ERROR: Failed to connect to destination: %v", err)
 		log.Println(errMsg)
@@ -299,7 +299,7 @@ func main() {
 func notifyMasterOfUpload(masterIP, masterPort, fileName, dataKeeperID, filePath, uploadToken, clientPort, clientIP string) {
 	// Connect to the master tracker
 	masterAddr := fmt.Sprintf("%s:%s", masterIP, masterPort)
-	conn, err := grpc.Dial(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.Dial(masterAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(1024*1024*1024), grpc.MaxCallRecvMsgSize(1024*1024*1024)))
 	if err != nil {
 		log.Printf("DataKeeper %s: failed to connect to master tracker: %v", dataKeeperID, err)
 		return

@@ -169,7 +169,7 @@ func uploadFile(masterClient pb.DistributedFileSystemClient, notificationChan ch
 
 	//Connect to assigned Data Keeper and upload the file
 	dataKeeperAddr := fmt.Sprintf("%s:%s", uploadPermResp.AssignedDataKeeper.Ip, uploadPermResp.AssignedDataKeeper.Port)
-	dataKeeperConn, err := grpc.Dial(dataKeeperAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	dataKeeperConn, err := grpc.Dial(dataKeeperAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(1024*1024*1024), grpc.MaxCallRecvMsgSize(1024*1024*1024)))
 	if err != nil {
 		log.Printf("Client: failed to connect to Data Keeper at %s: %v", dataKeeperAddr, err)
 		return
@@ -303,7 +303,7 @@ func downloadFile(masterClient pb.DistributedFileSystemClient, clientId string) 
 
 	//Connect to the selected data keeper
 	dataKeeperAddr := fmt.Sprintf("%s:%s", keeper.Ip, keeper.Port)
-	dataKeeperConn, err := grpc.Dial(dataKeeperAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	dataKeeperConn, err := grpc.Dial(dataKeeperAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithDefaultCallOptions(grpc.MaxCallSendMsgSize(1024*1024*1024), grpc.MaxCallRecvMsgSize(1024*1024*1024)))
 	if err != nil {
 		log.Printf("Client: failed to connect to Data Keeper at %s: %v", err)
 		return
