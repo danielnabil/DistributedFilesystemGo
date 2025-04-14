@@ -113,7 +113,10 @@ func startClientServer(notificationChan chan string, clientPort string) {
 		log.Fatalf("Client: failed to listen on port %s: %v", clientPort, err)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.MaxRecvMsgSize(1024*1024*1024),
+		grpc.MaxSendMsgSize(1024*1024*1024),
+	)
 	server := &clientServer{
 		notificationChan: notificationChan,
 	}

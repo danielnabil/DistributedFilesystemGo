@@ -252,7 +252,10 @@ func main() {
 		log.Fatalf("MasterTracker: failed to listen: %v", err)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.MaxRecvMsgSize(1024*1024*1024),
+		grpc.MaxSendMsgSize(1024*1024*1024),
+	)
 	master := &masterTrackerServer{
 		lookupTable: make(map[string]*fileInfo),
 		dataKeepers: make(map[string]*dataKeeperInfo),

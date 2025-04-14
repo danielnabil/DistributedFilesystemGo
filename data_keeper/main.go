@@ -367,7 +367,10 @@ func startServer(keeper *dataKeeperServer, port string, wg *sync.WaitGroup) {
 		log.Fatalf("DataKeeper %s: failed to listen on port %s: %v", keeper.id, port, err)
 	}
 
-	grpcServer := grpc.NewServer()
+	grpcServer := grpc.NewServer(
+		grpc.MaxRecvMsgSize(1024*1024*1024),
+		grpc.MaxSendMsgSize(1024*1024*1024),
+	)
 	pb.RegisterDistributedFileSystemServer(grpcServer, keeper)
 
 	log.Printf("DataKeeper %s: Server is listening on port %s...", keeper.id, port)
